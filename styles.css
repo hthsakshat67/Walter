@@ -389,8 +389,21 @@ tbody tr:hover { background: var(--surface-secondary); }
   gap: var(--space-4);
   align-items: start;
 }
-.phone-demo p, .phone-demo .meta { color: rgba(255,255,255,.72); }
+.phone-demo h3,
+.phone-demo small,
+.phone-demo .row-title { color: var(--primary-contrast); }
+.phone-demo .row-title {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+.phone-demo p, .phone-demo .meta { color: rgba(255,255,255,.82); }
 .phone-demo .badge { justify-self: start; }
+.phone-demo .badge.success {
+  background: rgba(255,255,255,.14);
+  border: 1px solid rgba(255,255,255,.24);
+  color: var(--primary-contrast);
+}
 .phone-row {
   background: rgba(255,255,255,.08);
   border-color: rgba(255,255,255,.18);
@@ -402,7 +415,7 @@ tbody tr:hover { background: var(--surface-secondary); }
 }
 .preview-appointment {
   display: grid;
-  grid-template-columns: 56px minmax(0, 1fr) auto;
+  grid-template-columns: 64px minmax(0, 1fr);
   gap: var(--space-2);
   align-items: center;
   padding: 10px;
@@ -411,11 +424,15 @@ tbody tr:hover { background: var(--surface-secondary); }
   background: var(--surface);
   min-height: 58px;
 }
+.preview-appointment .badge {
+  grid-column: 2;
+  justify-self: start;
+  margin-top: 2px;
+}
 .preview-appointment strong {
   display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  line-height: 1.25;
 }
 .section {
   padding: var(--space-8) 28px;
@@ -450,6 +467,71 @@ tbody tr:hover { background: var(--surface-secondary); }
   padding: var(--space-5);
   display: grid;
   gap: var(--space-2);
+}
+
+.card-top {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.setting-list {
+  display: grid;
+  gap: var(--space-3);
+}
+.compact-list { margin-top: var(--space-4); }
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-secondary);
+}
+.setting-row span:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.setting-row strong { font-size: 13px; }
+.avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  background: var(--primary);
+  color: var(--primary-contrast);
+  display: grid;
+  place-items: center;
+  font-weight: 750;
+  margin-bottom: var(--space-3);
+}
+.rule-flow {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+.rule-flow span {
+  min-height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  background: #e7f0e6;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 700;
+}
+.integration-card {
+  min-height: 188px;
+  display: grid;
+  align-content: space-between;
+}
+.billing-metrics {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 0;
 }
 
 .auth-shell {

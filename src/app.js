@@ -165,6 +165,41 @@ const customerService = {
   },
 };
 
+const serviceCatalog = {
+  list: () => state.services,
+  fetch: async () => {
+    try {
+      const data = await apiCall("/services");
+      state.services = data.map((service) => ({
+        id: service.id,
+        name: service.name,
+        description: service.description || "No description yet",
+        duration: `${service.durationMinutes || 30} min`,
+        buffer: `${service.bufferMinutes || 0} min buffer`,
+        price: Number(service.price || 0).toLocaleString("en-US", { style: "currency", currency: "USD" }),
+        active: service.active,
+      }));
+    } catch (e) {}
+  },
+};
+
+const staffDirectory = {
+  list: () => state.staff,
+  fetch: async () => {
+    try {
+      const data = await apiCall("/staff");
+      state.staff = data.map((staff) => ({
+        id: staff.id,
+        name: staff.name,
+        title: staff.title || "Team member",
+        email: staff.email || "No email",
+        phone: staff.phone || "No phone",
+        active: staff.active,
+      }));
+    } catch (e) {}
+  },
+};
+
 const conversationService = {
   list: () => state.conversations,
   byChannel: (channel) => state.conversations.filter((item) => item.channel.toLowerCase() === channel.toLowerCase()),
@@ -214,6 +249,8 @@ const stateManager = {
         apiCall("/analytics/overview").catch(() => null),
         appointmentService.fetch(),
         customerService.fetch(),
+        serviceCatalog.fetch(),
+        staffDirectory.fetch(),
         conversationService.fetch(),
         callService.fetch(),
       ]);
@@ -588,16 +625,84 @@ function customerForm() {
 }
 
 function settingsPage(label) {
-  const isAssistant = label === "AI Assistant Settings";
-  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Configuration</p><h1>${label}</h1><p>${isAssistant ? "Assistant identity, tone, escalation rules, and appointment permissions." : "Configuration foundation backed by server API settings."}</p></div><button class="btn primary" data-action="save">Save Changes</button></div>
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Business Settings</p><h1>${label}</h1><p>Keep account identity, timezone, public contact details, and receptionist defaults aligned with the way your business operates.</p></div><button class="btn primary" data-action="save">Save Changes</button></div>
   <div class="grid two-col">
-    <section class="panel"><div class="panel-head"><div><h2>${isAssistant ? `${assistantName} profile` : "Settings"}</h2></div></div><div class="auth-form">
-      <label>${isAssistant ? "Assistant Name" : "Business Name"}<input class="input" id="setting-biz-name" value="${isAssistant ? assistantName : (currentUser?.businessName || "Your Business")}"></label>
-      <label>Mode<select class="select"><option>Active</option><option>Draft</option></select></label>
-      <label>Escalation policy<select class="select"><option>Escalate pricing and conflict cases</option><option>Escalate every uncertain request</option></select></label>
+    <section class="panel"><div class="panel-head"><div><h2>Business Profile</h2><p class="meta">Public-facing details used in confirmations and customer messages.</p></div></div><div class="auth-form">
+      <label>Business Name<input class="input" value="${escapeHtml(currentUser?.businessName || "Your Business")}"></label>
+      <label>Timezone<select class="select"><option>America/New_York</option><option>America/Chicago</option><option>America/Denver</option><option>America/Los_Angeles</option></select></label>
+      <label>Reply Signature<input class="input" value="${escapeHtml(assistantName)} from ${escapeHtml(currentUser?.businessName || "your team")}"></label>
     </div></section>
-    <section class="panel"><div class="panel-head"><div><h2>Backend Architecture Status</h2></div></div><p>Fully connected to Node.js, Express, TypeScript, and Prisma backend with real double-booking checks and status history.</p></section>
+    <section class="panel"><div class="panel-head"><div><h2>Workspace Controls</h2><p class="meta">Operational defaults that affect scheduling behavior.</p></div></div><div class="setting-list">
+      ${settingRow("Appointment Holds", "Hold open slots while a customer confirms", "Enabled")}
+      ${settingRow("Cancellation Window", "Require staff review for same-day cancellations", "Staff Review")}
+      ${settingRow("Audit History", "Track every booking, status change, and customer edit", "Active")}
+    </div></section>
   </div>`);
+}
+
+function servicesPage() {
+  const services = serviceCatalog.list();
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Service Catalog</p><h1>Services</h1><p>Define bookable appointments with duration, buffer time, pricing, and active status.</p></div><button class="btn primary" data-action="save">Add Service</button></div>
+  ${services.length === 0 ? emptyState("No Services Yet", "Add services before customers can book appointments.") : `<div class="grid three-col">${services.map((service) => `<article class="card service-card"><div class="card-top"><h3>${escapeHtml(service.name)}</h3><span class="badge ${service.active ? "success" : ""}">${service.active ? "Active" : "Paused"}</span></div><p>${escapeHtml(service.description)}</p><div class="setting-list compact-list">${settingRow("Duration", service.duration, service.price)}${settingRow("Buffer", service.buffer, "Protected")}</div></article>`).join("")}</div>`}`);
+}
+
+function staffPage() {
+  const staff = staffDirectory.list();
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Team Routing</p><h1>Staff</h1><p>Manage who receives appointments, which profiles are active, and how staff contact details appear in scheduling workflows.</p></div><button class="btn primary" data-action="save">Invite Staff</button></div>
+  ${staff.length === 0 ? emptyState("No Staff Yet", "Invite team members or create staff profiles for appointment assignment.") : `<div class="grid three-col">${staff.map((person) => `<article class="card staff-card"><div class="avatar">${escapeHtml(person.name.split(" ").map((part) => part[0]).join("").slice(0, 2))}</div><h3>${escapeHtml(person.name)}</h3><p>${escapeHtml(person.title)}</p><div class="setting-list compact-list">${settingRow("Email", person.email, person.active ? "Active" : "Paused")}${settingRow("Phone", person.phone, "Routing")}</div></article>`).join("")}</div>`}`);
+}
+
+function automationPage() {
+  const rules = [
+    ["Confirmation Chase", "Send a reminder when an appointment is still pending 24 hours before start time.", "Ready"],
+    ["No-Show Watch", "Flag customers with repeated missed appointments for staff review.", "Monitoring"],
+    ["Human Escalation", "Move pricing disputes, medical questions, and unclear requests out of automation.", "Protected"],
+  ];
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Automation Rules</p><h1>Automation Rules</h1><p>Control where ${assistantName} acts automatically and where your team stays in the loop.</p></div><button class="btn primary" data-action="save">New Rule</button></div>
+  <div class="grid three-col">${rules.map(([name, detail, status]) => `<article class="card"><div class="card-top"><h3>${name}</h3><span class="badge success">${status}</span></div><p>${detail}</p><div class="rule-flow"><span>Trigger</span><span>Condition</span><span>Action</span></div></article>`).join("")}</div>`);
+}
+
+function assistantPage() {
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Assistant Behavior</p><h1>AI Assistant Settings</h1><p>Tune ${assistantName}'s identity, booking permissions, escalation style, and customer-facing tone.</p></div><button class="btn primary" data-action="save">Save Assistant</button></div>
+  <div class="grid two-col">
+    <section class="panel"><div class="panel-head"><div><h2>${escapeHtml(assistantName)} Profile</h2><p class="meta">The name and tone customers experience across calls and messages.</p></div></div><div class="auth-form">
+      <label>Assistant Name<input class="input" value="${escapeHtml(assistantName)}"></label>
+      <label>Tone<select class="select"><option>Warm and efficient</option><option>Formal and concise</option><option>Friendly and conversational</option></select></label>
+      <label>Booking Permission<select class="select"><option>Book, reschedule, and cancel within policy</option><option>Only suggest available times</option><option>Escalate all schedule changes</option></select></label>
+    </div></section>
+    <section class="panel"><div class="panel-head"><div><h2>Escalation Boundaries</h2><p class="meta">Clear limits keep the product trustworthy.</p></div></div><div class="setting-list">
+      ${settingRow("Pricing Questions", "Send to staff when pricing is ambiguous", "Escalate")}
+      ${settingRow("Double Booking", "Never override backend availability checks", "Blocked")}
+      ${settingRow("Customer Identity", "Confirm the person before changing an appointment", "Required")}
+    </div></section>
+  </div>`);
+}
+
+function integrationsPage() {
+  const integrations = [
+    ["Calendar", "Sync staff availability and push confirmed appointments.", "Not Connected"],
+    ["Phone", `Route inbound calls through ${assistantName}.`, "Not Connected"],
+    ["Messaging", "Unify WhatsApp and email conversations.", "Not Connected"],
+    ["Payments", "Attach deposits and invoices to booked services.", "Planned"],
+  ];
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Connected Channels</p><h1>Integrations</h1><p>Connect the systems that feed appointment requests into the same backend workflow.</p></div><button class="btn primary" data-action="save">Connect App</button></div>
+  <div class="grid four-col">${integrations.map(([name, detail, status]) => `<article class="card integration-card"><h3>${name}</h3><p>${detail}</p><span class="badge">${status}</span></article>`).join("")}</div>`);
+}
+
+function billingPage() {
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Plan And Usage</p><h1>Billing</h1><p>Track subscription status, receptionist usage, and billing controls for this workspace.</p></div><button class="btn primary" data-action="save">Manage Plan</button></div>
+  <div class="grid two-col">
+    <section class="panel"><div class="panel-head"><div><h2>Current Plan</h2><p class="meta">Workspace billing summary.</p></div><span class="badge warning">Setup Needed</span></div><div class="metric-strip billing-metrics">${metric("Starter", "Plan")}${metric("$0", "Current balance")}</div></section>
+    <section class="panel"><div class="panel-head"><div><h2>Usage Controls</h2><p class="meta">Protect costs while call volume grows.</p></div></div><div class="setting-list">
+      ${settingRow("Monthly Call Limit", "Set a cap before overage billing begins", "Unset")}
+      ${settingRow("SMS Reminders", "Bill only when reminders are enabled", "Available")}
+      ${settingRow("Invoice Contact", currentUser?.email || "No billing email", "Owner")}
+    </div></section>
+  </div>`);
+}
+
+function settingRow(label, detail, status) {
+  return `<div class="setting-row"><span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(detail)}</small></span><span class="badge">${escapeHtml(status)}</span></div>`;
 }
 
 function analyticsPage() {
@@ -641,7 +746,13 @@ function pageForRoute() {
   if (currentRoute === "calls") return callsPage();
   if (currentRoute === "whatsapp") return conversationsPage("WhatsApp");
   if (currentRoute === "email") return conversationsPage("Email");
+  if (currentRoute === "services") return servicesPage();
+  if (currentRoute === "staff") return staffPage();
+  if (currentRoute === "automation") return automationPage();
   if (currentRoute === "analytics") return analyticsPage();
+  if (currentRoute === "assistant") return assistantPage();
+  if (currentRoute === "integrations") return integrationsPage();
+  if (currentRoute === "billing") return billingPage();
   const route = routes.find(([id]) => id === currentRoute);
   return settingsPage(route ? route[1] : "Overview");
 }
