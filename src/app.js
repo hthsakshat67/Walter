@@ -79,6 +79,22 @@ let state = {
   error: null,
 };
 
+let customerEditor = null;
+
+function escapeHtml(value = "") {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[char]);
+}
+
+function emptyState(title, detail) {
+  return `<div class="empty-state"><h3>${title}</h3><p>${detail}</p></div>`;
+}
+
 // API Services powering the frontend views
 const appointmentService = {
   listToday: () => state.appointments,
@@ -125,14 +141,26 @@ const appointmentService = {
 
 const customerService = {
   list: () => state.customers,
+  getById: (id) => state.customers.find((customer) => String(customer.id) === String(id)),
   fetch: async () => {
     try {
       const data = await apiCall("/customers");
-      state.customers = data.map((c) => [c.name, c.email || "N/A", c.phone || "N/A", c.segment || "Standard", c.notes || "No notes"]);
+      state.customers = data.map((customer) => ({
+        id: customer.id,
+        name: customer.name,
+        email: customer.email || "",
+        phone: customer.phone || "",
+        segment: customer.segment || "Standard",
+        notes: customer.notes || "",
+      }));
     } catch (e) {}
   },
   create: async (data) => {
     await apiCall("/customers", "POST", data);
+    await customerService.fetch();
+  },
+  update: async (id, data) => {
+    await apiCall(`/customers/${id}`, "PATCH", data);
     await customerService.fetch();
   },
 };
@@ -158,13 +186,13 @@ const conversationService = {
 };
 
 const callService = {
-  latest: () => state.calls[0] || { customer: "Sofia Garcia", duration: "02:43", result: "Successfully rescheduled" },
+  latest: () => state.calls[0] || null,
   fetch: async () => {
     try {
       const data = await apiCall("/calls");
       state.calls = data.map((c) => ({
         id: c.id,
-        customer: c.customer?.name || "Sofia Garcia",
+        customer: c.customer?.name || "Unknown customer",
         duration: c.duration || "02:43",
         result: c.appointmentAction || "Call completed",
       }));
@@ -236,6 +264,7 @@ function navigate(route) {
 window.addEventListener("hashchange", () => {
   currentRoute = location.hash.replace("#/", "") || "landing";
   drawerAppointment = null;
+  customerEditor = null;
   render();
 });
 
@@ -251,7 +280,7 @@ function publicNav() {
     ${brand()}
     <div class="public-links">
       <button class="btn" data-route="pricing">Pricing</button>
-      ${currentToken ? `<button class="btn primary" data-route="overview">Dashboard</button>` : `<button class="btn" data-route="login">Login</button><button class="btn primary" data-route="signup">Sign up</button>`}
+      ${currentToken ? `<button class="btn primary" data-route="overview">Dashboard</button>` : `<button class="btn" data-route="login">Login</button><button class="btn primary" data-route="signup">Sign Up</button>`}
     </div>
   </nav>`;
 }
@@ -261,13 +290,13 @@ function landing() {
     <section class="hero">
       <div class="hero-copy reveal">
         <div class="page-copy">
-          <p class="eyebrow">Meet ${assistantName}</p>
-          <h1>Your AI receptionist, available 24/7.</h1>
-          <p>${assistantName} answers calls and messages, understands appointment intent, and keeps the schedule moving without hiding what happened from your team.</p>
+          <p class="eyebrow">Intelligent Front Desk Automation</p>
+          <h1>Appointment Operations That Feel Effortless.</h1>
+          <p>${assistantName} answers calls and messages, captures real customer details, and keeps every schedule change visible to your team.</p>
         </div>
         <div class="actions">
-          <button class="btn primary" data-route="signup">Start free</button>
-          <button class="btn" data-route="overview">View dashboard</button>
+          <button class="btn primary" data-route="signup">Create Account</button>
+          <button class="btn" data-route="login">Login</button>
         </div>
       </div>
       <div class="product-frame reveal">${productDemo()}</div>
@@ -275,8 +304,8 @@ function landing() {
     <section class="section">
       <div class="section-inner sticky-demo">
         <div class="section-head">
-          <p class="eyebrow">AI receptionist</p>
-          <h2>Built around appointments, not novelty.</h2>
+          <p class="eyebrow">AI Receptionist</p>
+          <h2>Built Around Appointments, Not Novelty.</h2>
           <p>The interface makes the receptionist's work legible: who contacted the business, what they needed, what ${assistantName} changed, and what still needs a human.</p>
           ${channelCards()}
         </div>
@@ -286,19 +315,19 @@ function landing() {
     ${pricingSection()}
     <section class="section">
       <div class="section-inner final-cta">
-        <p class="eyebrow">Ready for the next call</p>
-        <h2>Put ${assistantName} on the front desk.</h2>
-        <p>Launch a serious SaaS foundation today, connected directly to a real PostgreSQL & Prisma backend engine.</p>
-        <button class="btn primary" data-route="signup">Create account</button>
+        <p class="eyebrow">Ready For The Next Call</p>
+        <h2>Put ${assistantName} On The Front Desk.</h2>
+        <p>Launch a connected appointment workflow with authenticated accounts, editable customer records, and live backend data.</p>
+        <button class="btn primary" data-route="signup">Create Account</button>
       </div>
     </section>
   </main>`;
 }
 
 function productDemo() {
-  const summary = state.dashboardSummary || { appointmentsToday: 34, callsHandled: 47, pendingConfirmations: 6, noShowRisk: 3 };
+  const summary = state.dashboardSummary || { appointmentsToday: 0, callsHandled: 0, pendingConfirmations: 0, noShowRisk: 0 };
   return `<div class="product-window">
-    <div class="window-bar"><strong>Northside Wellness</strong><span class="badge success">${assistantName} online</span></div>
+    <div class="window-bar"><strong>${currentUser?.businessName || "Your Business"}</strong><span class="badge success">${assistantName} Online</span></div>
     <div class="window-body">
       <div class="metric-strip">
         ${metric(summary.appointmentsToday, "Appointments today")}
@@ -316,6 +345,9 @@ function productDemo() {
 
 function compactPreviewRows() {
   const rows = appointmentService.listToday();
+  if (rows.length === 0) {
+    return emptyState("No Appointments Yet", "Your live appointments appear here after you create an account and add customer bookings.");
+  }
   return `<div class="preview-list">${rows.slice(0, 4).map((appointment) => `<div class="preview-appointment">
     <span class="meta">${appointment.time}</span>
     <span><strong>${appointment.customer}</strong><span class="meta">${appointment.service}</span></span>
@@ -324,16 +356,18 @@ function compactPreviewRows() {
 }
 
 function phoneDemo() {
+  const latestCall = callService.latest();
+  const displayCustomer = latestCall?.customer || state.customers[0]?.name || "New Customer";
   return `<aside class="phone-demo">
     <div>
-      <small>Live phone call</small>
-      <h3>Sofia Garcia</h3>
+      <small>Live Phone Call</small>
+      <h3>${escapeHtml(displayCustomer)}</h3>
     </div>
-    <p>Intent: reschedule appointment</p>
+    <p>Intent: ${latestCall?.result || "appointment request"}</p>
     <div class="row phone-row">
-      <div class="row-main"><span class="row-title">${assistantName} offered 3:45 PM</span><span class="meta">Customer accepted by voice</span></div>
+      <div class="row-main"><span class="row-title">${assistantName} found the next open slot</span><span class="meta">Customer details sync to the backend</span></div>
     </div>
-    <span class="badge success">Successfully rescheduled</span>
+    <span class="badge success">Ready To Schedule</span>
   </aside>`;
 }
 
@@ -350,7 +384,7 @@ function pricingSection() {
     ["Scale", "Custom", "Multi-location operations, advanced integrations, and priority support."],
   ];
   return `<section class="section"><div class="section-inner">
-    <div class="section-head"><p class="eyebrow">Pricing</p><h2>Plans for appointment-based teams.</h2></div>
+    <div class="section-head"><p class="eyebrow">Pricing</p><h2>Plans For Appointment-Based Teams.</h2></div>
     <div class="grid three-col">
       ${plans.map((plan, index) => `<article class="card price-card ${index === 1 ? "featured" : ""}">
         <h3>${plan[0]}</h3>
@@ -369,19 +403,19 @@ function authPage(kind) {
       <div class="auth-panel reveal">
         ${brand("auth-brand")}
         <div class="auth-copy">
-          <h1>${isLogin ? "Welcome back" : "Create your account"}</h1>
-          <p>${isLogin ? `Sign in to review what ${assistantName} handled today.` : `Set up ${assistantName} for your business with a real backend integration.`}</p>
+          <h1>${isLogin ? "Welcome Back" : "Create Your Account"}</h1>
+          <p>${isLogin ? "Sign in with your account credentials." : `Set up ${assistantName} with an authenticated workspace and real backend data.`}</p>
         </div>
         <form class="auth-form" id="auth-form-el">
-          ${!isLogin ? `<label>Business name<input class="input" id="auth-biz-name" value="Northside Wellness"></label>` : ""}
-          <label>Email<input class="input" id="auth-email" type="email" value="${isLogin ? "owner@northsideclinic.com" : "owner@northsideclinic.com"}"></label>
-          <label>Password<input class="input" id="auth-password" type="password" value="password"><span class="helper">Use at least 8 characters.</span></label>
-          ${!isLogin ? `<label>Assistant name<input class="input" id="auth-assistant-name" value="${assistantName}"></label>` : ""}
+          ${!isLogin ? `<label>Business Name<input class="input" id="auth-biz-name" autocomplete="organization" required></label>` : ""}
+          <label>Email<input class="input" id="auth-email" type="email" autocomplete="email" required></label>
+          <label>Password<input class="input" id="auth-password" type="password" autocomplete="${isLogin ? "current-password" : "new-password"}" minlength="8" required><span class="helper">Use at least 8 characters.</span></label>
+          ${!isLogin ? `<label>Assistant Name<input class="input" id="auth-assistant-name" value="${assistantName}" required></label>` : ""}
           <div class="form-error" id="auth-error" hidden></div>
-          <button class="btn primary" type="submit" id="auth-submit-btn">${isLogin ? "Login" : "Sign up"}</button>
+          <button class="btn primary" type="submit" id="auth-submit-btn">${isLogin ? "Login" : "Sign Up"}</button>
           <div class="auth-links">
-            <a href="#/${isLogin ? "signup" : "login"}">${isLogin ? "Create an account" : "Already have an account?"}</a>
-            <a href="#/landing">Back to site</a>
+            <a href="#/${isLogin ? "signup" : "login"}">${isLogin ? "Create An Account" : "Already Have An Account?"}</a>
+            <a href="#/landing">Back To Site</a>
           </div>
         </form>
       </div>
@@ -401,8 +435,8 @@ function shell(content) {
       <header class="topbar">
         <input class="search" aria-label="Search" placeholder="Search customers, appointments, conversations">
         <div class="actions">
-          <span class="badge success">${assistantName} online</span>
-          <button class="btn primary" data-action="book">Book appointment</button>
+          <span class="badge success">${assistantName} Online</span>
+          <button class="btn primary" data-action="book">Book Appointment</button>
         </div>
       </header>
       <div class="content">${content}</div>
@@ -419,10 +453,10 @@ function metric(value, label) {
 }
 
 function overview() {
-  const summary = state.dashboardSummary || { appointmentsToday: 34, callsHandled: 47, pendingConfirmations: 6, noShowRisk: 3 };
+  const summary = state.dashboardSummary || { appointmentsToday: 0, callsHandled: 0, pendingConfirmations: 0, noShowRisk: 0 };
   return shell(`<div class="page-head">
-    <div class="page-copy"><p class="eyebrow">Sunday, August 16, 2026 - ${currentUser?.businessName || "Northside Wellness"}</p><h1>Today at a glance</h1><p>Operational work for the day, powered directly by backend PostgreSQL APIs.</p></div>
-    <div class="actions"><button class="btn" data-action="customer">Add customer</button><button class="btn" data-route="calendar">View calendar</button></div>
+    <div class="page-copy"><p class="eyebrow">${new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })} - ${escapeHtml(currentUser?.businessName || "Your Business")}</p><h1>Today At A Glance</h1><p>Live operational work powered by authenticated backend APIs.</p></div>
+    <div class="actions"><button class="btn" data-action="customer">Add Customer</button><button class="btn" data-route="calendar">View Calendar</button></div>
   </div>
   <div class="metric-strip">
     ${metric(summary.appointmentsToday, "Appointments today")}
@@ -431,17 +465,17 @@ function overview() {
     ${metric(summary.noShowRisk, "No-show risk")}
   </div>
   <div class="grid two-col">
-    <section class="panel"><div class="panel-head"><div><h2>Today's appointments</h2><p class="meta">Live queue for staff and assistant activity.</p></div><span class="badge warning">${summary.pendingConfirmations} pending</span></div>${appointmentsList()}</section>
+    <section class="panel"><div class="panel-head"><div><h2>Today's Appointments</h2><p class="meta">Live queue for staff and assistant activity.</p></div><span class="badge warning">${summary.pendingConfirmations} Pending</span></div>${appointmentsList()}</section>
     <div class="grid">
-      <section class="panel"><div class="panel-head"><div><h2>Active conversations</h2><p class="meta">Recent customer intent across channels.</p></div></div>${conversationList()}</section>
-      <section class="panel"><div class="panel-head"><div><h2>Recent activity</h2></div></div>${activityList()}</section>
+      <section class="panel"><div class="panel-head"><div><h2>Active Conversations</h2><p class="meta">Recent customer intent across channels.</p></div></div>${conversationList()}</section>
+      <section class="panel"><div class="panel-head"><div><h2>Recent Activity</h2></div></div>${activityList()}</section>
     </div>
   </div>`);
 }
 
 function appointmentsList(compact = false) {
   const rows = appointmentService.listToday();
-  if (rows.length === 0) return `<p class="meta" style="padding:1rem;">No appointments found.</p>`;
+  if (rows.length === 0) return emptyState("No Appointments Found", "Book an appointment to start building your live schedule.");
   return `<div class="list">${rows.map((appointment) => `<button class="row timeline-item" data-open-appt="${appointment.id}">
     <span class="meta">${appointment.time}</span>
     <span class="row-main"><span class="row-title">${appointment.customer}</span><span class="meta">${appointment.service} with ${appointment.staff} - ${appointment.duration} - ${appointment.channel}</span></span>
@@ -451,7 +485,7 @@ function appointmentsList(compact = false) {
 
 function appointmentsPage() {
   return shell(`<div class="page-head">
-    <div class="page-copy"><p class="eyebrow">Appointment management</p><h1>Appointments</h1><p>Book, reschedule, cancel, confirm, and complete appointments while preserving channel and staff context.</p></div>
+    <div class="page-copy"><p class="eyebrow">Appointment Management</p><h1>Appointments</h1><p>Book, reschedule, cancel, confirm, and complete appointments while preserving channel and staff context.</p></div>
     <div class="actions"><button class="btn primary" data-action="book">Book</button><button class="btn" data-action="quick-reschedule">Reschedule</button><button class="btn danger" data-action="cancel">Cancel</button></div>
   </div>
   <div class="tabs">${["Day", "Week", "Month"].map((tab, index) => `<button class="tab ${index === 1 ? "active" : ""}">${tab}</button>`).join("")}</div>
@@ -469,12 +503,17 @@ function appointmentTable() {
 
 function calendarPage() {
   const days = Array.from({ length: 35 }, (_, index) => index + 1);
+  const appointmentsByDay = appointmentService.listToday().reduce((acc, appointment) => {
+    const day = Number(appointment.date.split(" ").pop());
+    if (day) (acc[day] ||= []).push(appointment);
+    return acc;
+  }, {});
   return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">August 2026</p><h1>Calendar</h1><p>Month view with assistant-driven confirmations and appointment context.</p></div><div class="tabs">${["Day", "Week", "Month"].map((tab, index) => `<button class="tab ${index === 2 ? "active" : ""}">${tab}</button>`).join("")}</div></div>
-  <div class="calendar">${days.map((day) => `<div class="day"><strong>${day}</strong>${day % 5 === 0 ? `<div class="appt-chip">${assistantName}: confirmation queue</div>` : ""}${day === 16 ? `<div class="appt-chip">8:30 Maya Thompson</div><div class="appt-chip">3:45 Sofia Garcia</div>` : ""}</div>`).join("")}</div>`);
+  <div class="calendar">${days.map((day) => `<div class="day"><strong>${day}</strong>${(appointmentsByDay[day] || []).map((appointment) => `<div class="appt-chip">${appointment.time} ${escapeHtml(appointment.customer)}</div>`).join("")}</div>`).join("")}</div>`);
 }
 
 function conversationList(items = conversationService.list()) {
-  if (items.length === 0) return `<p class="meta" style="padding:1rem;">No active conversations.</p>`;
+  if (items.length === 0) return emptyState("No Active Conversations", "Customer conversations will appear here once calls, emails, or messages are recorded.");
   return `<div class="list">${items.map((conversation) => `<div class="row">
     <span class="row-main"><span class="row-title">${conversation.customer}</span><span class="meta">${conversation.channel} - ${conversation.intent} - handled by ${conversation.handler}</span></span>
     <span class="badge ${badgeClass(conversation.status)}">${conversation.status}</span>
@@ -482,25 +521,25 @@ function conversationList(items = conversationService.list()) {
 }
 
 function activityList() {
-  const activityData = [
-    ["7:58 AM", `${assistantName} confirmed Maya Thompson by phone`],
-    ["8:16 AM", "Cancellation request routed to front desk"],
-    ["8:44 AM", "Reminder batch sent for tomorrow's appointments"],
-    ["9:05 AM", `${assistantName} flagged Sofia Garcia as no-show risk`],
-  ];
+  const appointments = appointmentService.listToday();
+  const activityData = appointments.slice(0, 4).map((appointment) => [
+    appointment.time,
+    `${assistantName} has ${appointment.status} status for ${appointment.customer}`,
+  ]);
+  if (activityData.length === 0) return emptyState("No Recent Activity", "Actions from appointments and conversations will appear here.");
   return `<div class="list activity-list">${activityData.map(([time, text]) => `<div class="row"><span class="meta">${time}</span><span class="row-main"><span class="row-title">${text}</span></span></div>`).join("")}</div>`;
 }
 
 function conversationsPage(channel) {
   const title = channel || "Conversations";
   const filtered = channel ? conversationService.byChannel(channel) : conversationService.list();
-  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Unified conversation centre</p><h1>${title}</h1><p>Each conversation shows customer intent, channel, handler, status, and the outcome ${assistantName} produced or escalated.</p></div><button class="btn">Transfer selected to human</button></div>
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Unified Conversation Center</p><h1>${title}</h1><p>Each conversation shows customer intent, channel, handler, status, and the outcome ${assistantName} produced or escalated.</p></div><button class="btn">Transfer Selected To Human</button></div>
   <div class="grid two-col">
     <section class="panel"><div class="panel-head"><div><h2>Inbox</h2><p class="meta">${filtered.length} conversations in view.</p></div></div>${conversationList(filtered)}</section>
-    <section class="panel"><div class="panel-head"><div><h2>Conversation detail</h2><p class="meta">Representative transcript preview.</p></div></div><div class="detail-stack">
-      <p><strong>Intent:</strong> Reschedule appointment</p>
-      <p><strong>Result:</strong> Successfully rescheduled by ${assistantName}</p>
-      <p><strong>Transcript:</strong> Customer asked for a later appointment. ${assistantName} offered available times, confirmed the new slot, and sent a reminder.</p>
+    <section class="panel"><div class="panel-head"><div><h2>Conversation Detail</h2><p class="meta">Select a conversation to review transcript context.</p></div></div><div class="detail-stack">
+      <p><strong>Intent:</strong> ${filtered[0]?.intent || "No conversation selected"}</p>
+      <p><strong>Result:</strong> ${filtered[0]?.result || "Conversation outcomes will appear here."}</p>
+      <p><strong>Customer:</strong> ${filtered[0]?.customer || "None selected"}</p>
       <button class="btn">Review transcript</button>
     </div></section>
   </div>`);
@@ -508,32 +547,52 @@ function conversationsPage(channel) {
 
 function callsPage() {
   const latestCall = callService.latest();
-  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Phone call history</p><h1>AI Phone Calls</h1><p>Call outcomes make it clear what ${assistantName} actually did during each phone interaction.</p></div><span class="badge success">${assistantName} answering calls</span></div>
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Phone Call History</p><h1>AI Phone Calls</h1><p>Call outcomes make it clear what ${assistantName} actually did during each phone interaction.</p></div><span class="badge success">${assistantName} Answering Calls</span></div>
   <div class="grid two-col">
     <section class="panel">${conversationList(conversationService.byChannel("Phone"))}</section>
-    <section class="panel"><div class="panel-head"><div><h2>Call detail</h2><p class="meta">Duration ${latestCall.duration || "02:43"}</p></div></div><div class="detail-stack">
-      <p><strong>Customer:</strong> ${latestCall.customer}</p>
-      <p><strong>Status:</strong> Completed</p>
-      <p><strong>Appointment action:</strong> ${latestCall.result}</p>
-      <p><strong>AI summary:</strong> ${assistantName} moved the appointment from 2:00 PM to 3:45 PM and sent confirmation by SMS.</p>
-      <div class="actions"><button class="btn">Recording placeholder</button><button class="btn">Transfer status: not needed</button></div>
+    <section class="panel"><div class="panel-head"><div><h2>Call Detail</h2><p class="meta">Duration ${latestCall?.duration || "00:00"}</p></div></div><div class="detail-stack">
+      <p><strong>Customer:</strong> ${latestCall?.customer || "No call selected"}</p>
+      <p><strong>Status:</strong> ${latestCall ? "Completed" : "No calls recorded"}</p>
+      <p><strong>Appointment action:</strong> ${latestCall?.result || "Call outcomes will appear here."}</p>
+      <p><strong>AI summary:</strong> ${latestCall ? `${assistantName} handled the call and saved the result to this account.` : "Connect phone calls to review summaries from real customer interactions."}</p>
+      <div class="actions"><button class="btn">Recording</button><button class="btn">Transfer Status</button></div>
     </div></section>
   </div>`);
 }
 
 function customersPage() {
   const list = customerService.list();
-  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Customer records</p><h1>Customers</h1><p>Customer context for appointment history, risk, and next actions.</p></div><button class="btn primary" data-action="customer">Add customer</button></div>
-  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Phone</th><th>Segment</th><th>Next action</th></tr></thead><tbody>${list.map((customer) => `<tr>${customer.map((value) => `<td>${value}</td>`).join("")}</tr>`).join("")}</tbody></table>
-  <div class="mobile-list">${list.map((customer) => `<div class="row"><span class="row-main"><span class="row-title">${customer[0]}</span><span class="meta">${customer[2]} - ${customer[4]}</span></span><span class="badge">${customer[3]}</span></div>`).join("")}</div></div>`);
+  const rows = list.map((customer) => `<tr data-action="edit-customer" data-id="${customer.id}"><td>${escapeHtml(customer.name)}</td><td>${escapeHtml(customer.email || "Not added")}</td><td>${escapeHtml(customer.phone || "Not added")}</td><td><span class="badge">${escapeHtml(customer.segment)}</span></td><td>${escapeHtml(customer.notes || "No notes yet")}</td></tr>`).join("");
+  const mobileRows = list.map((customer) => `<button class="row" data-action="edit-customer" data-id="${customer.id}"><span class="row-main"><span class="row-title">${escapeHtml(customer.name)}</span><span class="meta">${escapeHtml(customer.phone || customer.email || "No contact details")} - ${escapeHtml(customer.notes || "No notes yet")}</span></span><span class="badge">${escapeHtml(customer.segment)}</span></button>`).join("");
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Customer Records</p><h1>Customers</h1><p>Edit names, contact details, segment, and notes without leaving the live account workspace.</p></div><button class="btn primary" data-action="customer">Add Customer</button></div>
+  ${list.length === 0 ? emptyState("No Customers Yet", "Add the first customer to start booking appointments with real backend records.") : `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Phone</th><th>Segment</th><th>Next Action</th></tr></thead><tbody>${rows}</tbody></table><div class="mobile-list">${mobileRows}</div></div>`}
+  ${customerForm()}`);
+}
+
+function customerForm() {
+  if (!customerEditor) return "";
+  const isEditing = customerEditor !== "new";
+  const customer = isEditing ? customerService.getById(customerEditor) : null;
+  return `<div class="modal-backdrop open" role="dialog" aria-modal="true">
+    <form class="modal-panel auth-form" id="customer-form-el">
+      <div class="page-head compact"><div class="page-copy"><p class="eyebrow">${isEditing ? "Edit Customer" : "New Customer"}</p><h2>${isEditing ? "Update Customer" : "Add Customer"}</h2></div><button class="btn" type="button" data-action="close-customer">Close</button></div>
+      <label>Full Name<input class="input" id="customer-name" value="${escapeHtml(customer?.name || "")}" autocomplete="name" required></label>
+      <label>Email<input class="input" id="customer-email" type="email" value="${escapeHtml(customer?.email || "")}" autocomplete="email"></label>
+      <label>Phone<input class="input" id="customer-phone" value="${escapeHtml(customer?.phone || "")}" autocomplete="tel"></label>
+      <label>Segment<select class="select" id="customer-segment">${["Standard", "High value", "Needs confirmation", "No-show risk", "New lead"].map((segment) => `<option ${segment === (customer?.segment || "Standard") ? "selected" : ""}>${segment}</option>`).join("")}</select></label>
+      <label>Notes<textarea class="input textarea" id="customer-notes">${escapeHtml(customer?.notes || "")}</textarea></label>
+      <div class="form-error" id="customer-error" hidden></div>
+      <button class="btn primary" type="submit">${isEditing ? "Save Customer" : "Create Customer"}</button>
+    </form>
+  </div>`;
 }
 
 function settingsPage(label) {
   const isAssistant = label === "AI Assistant Settings";
-  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Configuration</p><h1>${label}</h1><p>${isAssistant ? "Assistant identity, tone, escalation rules, and appointment permissions." : "Configuration foundation backed by server API settings."}</p></div><button class="btn primary" data-action="save">Save changes</button></div>
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Configuration</p><h1>${label}</h1><p>${isAssistant ? "Assistant identity, tone, escalation rules, and appointment permissions." : "Configuration foundation backed by server API settings."}</p></div><button class="btn primary" data-action="save">Save Changes</button></div>
   <div class="grid two-col">
     <section class="panel"><div class="panel-head"><div><h2>${isAssistant ? `${assistantName} profile` : "Settings"}</h2></div></div><div class="auth-form">
-      <label>${isAssistant ? "Assistant name" : "Business name"}<input class="input" id="setting-biz-name" value="${isAssistant ? assistantName : (currentUser?.businessName || "Northside Wellness")}"></label>
+      <label>${isAssistant ? "Assistant Name" : "Business Name"}<input class="input" id="setting-biz-name" value="${isAssistant ? assistantName : (currentUser?.businessName || "Your Business")}"></label>
       <label>Mode<select class="select"><option>Active</option><option>Draft</option></select></label>
       <label>Escalation policy<select class="select"><option>Escalate pricing and conflict cases</option><option>Escalate every uncertain request</option></select></label>
     </div></section>
@@ -542,8 +601,8 @@ function settingsPage(label) {
 }
 
 function analyticsPage() {
-  const data = state.analytics || { bookingSuccessRate: "91%", avgResponseTimeSaved: "18m", escalationsCount: 12, customerRating: "4.8" };
-  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Operational reporting</p><h1>Analytics</h1><p>Outcome-oriented reporting for bookings, escalations, response time, and customer satisfaction.</p></div></div>
+  const data = state.analytics || { bookingSuccessRate: "0%", avgResponseTimeSaved: "0m", escalationsCount: 0, customerRating: "N/A" };
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Operational Reporting</p><h1>Analytics</h1><p>Outcome-oriented reporting for bookings, escalations, response time, and customer satisfaction.</p></div></div>
   <div class="metric-strip">${metric(data.bookingSuccessRate, "Booking success")}${metric(data.avgResponseTimeSaved, "Avg response saved")}${metric(data.escalationsCount, "Escalations")}${metric(data.customerRating, "Customer rating")}</div>
   <section class="panel"><h2>Conversation outcomes</h2><p>Resolved appointment requests, confirmations, cancellations, and escalations recorded in database history.</p></section>`);
 }
@@ -630,6 +689,36 @@ function attachFormListeners() {
       navigate("landing");
     });
   }
+
+  const customerFormEl = document.getElementById("customer-form-el");
+  if (customerFormEl) {
+    customerFormEl.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errorDiv = document.getElementById("customer-error");
+      const payload = {
+        name: document.getElementById("customer-name").value.trim(),
+        email: document.getElementById("customer-email").value.trim() || null,
+        phone: document.getElementById("customer-phone").value.trim() || null,
+        segment: document.getElementById("customer-segment").value,
+        notes: document.getElementById("customer-notes").value.trim() || null,
+      };
+
+      try {
+        if (customerEditor === "new") {
+          await customerService.create(payload);
+          showToast(`${payload.name} was added.`);
+        } else {
+          await customerService.update(customerEditor, payload);
+          showToast(`${payload.name} was updated.`);
+        }
+        customerEditor = null;
+        render();
+      } catch (err) {
+        errorDiv.hidden = false;
+        errorDiv.textContent = err.message || "Customer could not be saved.";
+      }
+    });
+  }
 }
 
 async function render() {
@@ -648,6 +737,26 @@ async function render() {
 
     if (action === "close") {
       drawerAppointment = null;
+      render();
+      return;
+    }
+
+    if (action === "close-customer") {
+      customerEditor = null;
+      render();
+      return;
+    }
+
+    if (action === "customer") {
+      currentRoute = "customers";
+      location.hash = "/customers";
+      customerEditor = "new";
+      render();
+      return;
+    }
+
+    if (action === "edit-customer") {
+      customerEditor = element.dataset.id;
       render();
       return;
     }
@@ -682,17 +791,20 @@ async function render() {
     }
 
     if (action === "book") {
-      const custName = prompt("Customer Name:", "Maya Thompson");
+      const custName = prompt("Customer Name:");
       if (!custName) return;
       try {
-        // Fetch or pick first customer, service
         const custs = await apiCall("/customers");
         const srvs = await apiCall("/services");
         const stff = await apiCall("/staff");
 
-        const targetCust = custs[0] || (await apiCall("/customers", "POST", { name: custName }));
+        const normalizedName = custName.trim();
+        const targetCust = custs.find((customer) => customer.name.toLowerCase() === normalizedName.toLowerCase()) ||
+          (await apiCall("/customers", "POST", { name: normalizedName, segment: "New lead" }));
         const targetSrv = srvs[0];
         const targetStff = stff[0];
+
+        if (!targetSrv) throw new Error("Create a service before booking appointments.");
 
         const tomorrow = new Date();
         tomorrow.setDate(tomorrow.getDate() + 1);

@@ -380,12 +380,57 @@ apiRouter.post('/customers', async (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
     const { name, email, phone, segment, notes } = req.body;
-    if (!name) throw new AppError('Customer name is required', 400);
+    const customerName = String(name || '').trim();
+    if (!customerName) throw new AppError('Customer name is required', 400);
+
+    const existingCustomer = await prisma.customer.findFirst({
+      where: {
+        businessId: tenantId,
+        name: { equals: customerName },
+      },
+    });
+    if (existingCustomer) {
+      throw new AppError('A customer with this name already exists. Edit the existing customer or use a distinct full name.', 409);
+    }
 
     const customer = await prisma.customer.create({
-      data: { businessId: tenantId, name, email, phone, segment, notes },
+      data: { businessId: tenantId, name: customerName, email, phone, segment, notes },
     });
     return res.status(201).json(customer);
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.patch('/customers/:id', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const { name, email, phone, segment, notes } = req.body;
+    const customerName = String(name || '').trim();
+    if (!customerName) throw new AppError('Customer name is required', 400);
+
+    const customer = await prisma.customer.findFirst({
+      where: { id: req.params.id, businessId: tenantId },
+    });
+    if (!customer) throw new AppError('Customer not found', 404);
+
+    const nameConflict = await prisma.customer.findFirst({
+      where: {
+        businessId: tenantId,
+        name: { equals: customerName },
+        NOT: { id: req.params.id },
+      },
+    });
+    if (nameConflict) {
+      throw new AppError('Another customer already uses this name. Customer names must be distinct in this account.', 409);
+    }
+
+    const updatedCustomer = await prisma.customer.update({
+      where: { id: req.params.id },
+      data: { name: customerName, email, phone, segment, notes },
+    });
+
+    return res.json(updatedCustomer);
   } catch (err) {
     next(err);
   }
