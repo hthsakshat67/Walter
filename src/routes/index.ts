@@ -1,4 +1,4 @@
-import { Router, Response } from 'express';
+import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../db/prisma.js';
 import { authenticate, generateToken, getTenantId, AuthenticatedRequest } from '../middleware/auth.js';
@@ -7,7 +7,8 @@ import { AvailabilityEngine } from '../modules/availability/availabilityEngine.j
 import { AIToolLayer } from '../modules/ai/aiToolLayer.js';
 import { ConversationService } from '../modules/conversations/conversationService.js';
 import { AppError } from '../middleware/errorHandler.js';
-
+import { handleAsteriskWebhook } from '../modules/voice/voiceController.js';
+import { VoiceProviderManager } from '../modules/voice/voiceProviderManager.js';
 export const apiRouter = Router();
 
 // -------------------------------------------------------------
@@ -661,16 +662,7 @@ apiRouter.post('/ai/tools/execute', async (req: AuthenticatedRequest, res, next)
 // 9. WEBHOOK ADAPTERS (Voice, WhatsApp, Email)
 // -------------------------------------------------------------
 
-apiRouter.post('/webhooks/voice', async (req, res, next) => {
-  try {
-    // Idempotent webhook handling for voice providers (e.g. Twilio / Vapi / Retell)
-    const { callSid, from, event, transcript, intent } = req.body;
-    console.log(`[VoiceWebhook] Received event ${event} for callSid ${callSid}`);
-    return res.json({ status: 'received', callSid });
-  } catch (err) {
-    next(err);
-  }
-});
+apiRouter.post('/webhooks/voice/asterisk', handleAsteriskWebhook);
 
 apiRouter.post('/webhooks/whatsapp', async (req, res, next) => {
   try {
@@ -690,4 +682,9 @@ apiRouter.post('/webhooks/email', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+apiRouter.get('/voice/health', (req, res) => {
+  const enabled = process.env.ASTERISK_ENABLED === 'true';
+  const status = VoiceProviderManager.getInstance().getStatus();
+  res.json({ voice: { enabled, provider: 'asterisk', status } });
 });

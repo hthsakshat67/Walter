@@ -237,6 +237,8 @@ model PhoneCall {
   conversationId    String?
   customerId        String?
   callSid           String?
+  provider          String           @default("local")
+  providerCallId    String?
   direction         String           @default("INBOUND") // INBOUND, OUTBOUND
   status            String           @default("COMPLETED") // IN_PROGRESS, COMPLETED, FAILED
   duration          String?          @default("00:00")
@@ -249,6 +251,10 @@ model PhoneCall {
   transferStatus    String?          @default("not needed")
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @updatedAt
+  // New timestamps for lifecycle tracking
+  startedAt         DateTime?
+  answeredAt        DateTime?
+  endedAt           DateTime?
 
   business          Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
   conversation      Conversation?    @relation(fields: [conversationId], references: [id], onDelete: SetNull)
@@ -258,6 +264,7 @@ model PhoneCall {
 
   @@index([businessId])
   @@index([conversationId])
+  @@unique([provider, providerCallId, businessId])
 }
 
 model CallTranscript {
