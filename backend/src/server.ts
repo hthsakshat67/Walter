@@ -8,10 +8,10 @@ import { errorHandler } from './middleware/errorHandler.js';
 import { NotificationJobs } from './modules/jobs/notificationJobs.js';
 import { VoiceProviderManager } from './modules/voice/voiceProviderManager.js';
 
-dotenv.config();
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -20,9 +20,9 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve static frontend root
-const projectRoot = path.join(__dirname, '..');
-app.use(express.static(projectRoot));
+// Serve static frontend files
+const frontendPath = path.resolve(__dirname, '../../frontend');
+app.use(express.static(frontendPath));
 
 // Mount API v1
 app.use('/api/v1', apiRouter);
@@ -34,7 +34,8 @@ app.get('/health', (req, res) => {
 
 // OpenAPI Spec endpoint
 app.get('/api-docs/openapi.json', (req, res) => {
-  res.sendFile(path.join(projectRoot, 'src', 'docs', 'openapi.json'));
+  const openapiPath = path.resolve(__dirname, '../src/docs/openapi.json');
+  res.sendFile(openapiPath);
 });
 
 // Centralized error handler
@@ -72,7 +73,8 @@ if (process.env.NODE_ENV !== 'test') {
     });
   };
   process.on('SIGINT', shutdown);
-  process.on('SIGSIGTERM', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
 export default app;
+

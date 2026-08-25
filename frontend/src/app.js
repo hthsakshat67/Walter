@@ -18,9 +18,18 @@ async function apiCall(endpoint, method = "GET", body = null) {
 
   try {
     const res = await fetch(`${API_BASE}${endpoint}`, options);
-    const data = await res.json();
+    const text = await res.text();
+    let data = null;
+    if (text.trim()) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(`Invalid JSON (${res.status})`);
+      }
+    }
     if (!res.ok) {
-      throw new Error(data.error || data.message || "API request failed");
+      const msg = data?.error?.message || data?.error || `Request failed (${res.status})`;
+      throw new Error(msg);
     }
     return data;
   } catch (err) {
@@ -77,12 +86,9 @@ let state = {
   businessSettings: null,
   loading: false,
   error: null,
-  whatsappConnected: localStorage.getItem("whatsapp_connected") === "true",
 };
 
 let customerEditor = null;
-let activeConversationId = null;
-
 
 function escapeHtml(value = "") {
   return String(value).replace(/[&<>"']/g, (char) => ({
@@ -166,10 +172,6 @@ const customerService = {
     await apiCall(`/customers/${id}`, "PATCH", data);
     await customerService.fetch();
   },
-  delete: async (id) => {
-    await apiCall(`/customers/${id}`, "DELETE");
-    await customerService.fetch();
-  },
 };
 
 const serviceCatalog = {
@@ -222,7 +224,6 @@ const conversationService = {
         status: c.status,
         handler: c.handler || assistantName,
         result: c.result || "Processed",
-        messages: c.messages || [],
       }));
     } catch (e) {}
   },
@@ -243,6 +244,51 @@ const callService = {
   },
 };
 
+const automationRuleService = {
+  list: () => state.automationRules || [],
+  fetch: async () => {
+    try {
+      state.automationRules = await apiCall("/automation-rules");
+    } catch (e) {}
+  }
+};
+
+const integrationService = {
+  list: () => state.integrations || [],
+  fetch: async () => {
+    try {
+      state.integrations = await apiCall("/integrations");
+    } catch (e) {}
+  }
+};
+
+const billingService = {
+  getSubscription: () => state.subscription || null,
+  fetch: async () => {
+    try {
+      state.subscription = await apiCall("/billing/subscription");
+    } catch (e) {}
+  }
+};
+
+const businessSettingsService = {
+  get: () => state.businessSettings || null,
+  fetch: async () => {
+    try {
+      state.businessSettings = await apiCall("/business/settings");
+      if (state.businessSettings?.assistantName) {
+        assistantName = state.businessSettings.assistantName;
+      }
+    } catch (e) {}
+  },
+  update: async (data) => {
+    const res = await apiCall("/business/settings", "PATCH", data);
+    state.businessSettings = res;
+    if (res.assistantName) assistantName = res.assistantName;
+    return res;
+  }
+};
+
 const notificationService = {
   messageFor: (action) => `${titleCase(action)} request processed by backend engine.`,
 };
@@ -261,6 +307,10 @@ const stateManager = {
         staffDirectory.fetch(),
         conversationService.fetch(),
         callService.fetch(),
+        automationRuleService.fetch(),
+        integrationService.fetch(),
+        billingService.fetch(),
+        businessSettingsService.fetch(),
       ]);
       if (summary) state.dashboardSummary = summary;
       if (analytics) state.analytics = analytics;
@@ -372,8 +422,7 @@ function landing() {
 function productDemo() {
   const summary = state.dashboardSummary || { appointmentsToday: 0, callsHandled: 0, pendingConfirmations: 0, noShowRisk: 0 };
   return `<div class="product-window">
-    <div class="window-bar"><strong>${currentUser?.businessName || "Your Business"}</strong><span id="header-clock" style="margin-right: 15px; font-weight: 500; font-size: 14px; opacity: 0.85;"></span>
-          <span class="badge success">${assistantName} Online</span></div>
+    <div class="window-bar"><strong>${currentUser?.businessName || "Your Business"}</strong><span class="badge success">${assistantName} Online</span></div>
     <div class="window-body">
       <div class="metric-strip">
         ${metric(summary.appointmentsToday, "Appointments today")}
@@ -560,14 +609,10 @@ function calendarPage() {
 
 function conversationList(items = conversationService.list()) {
   if (items.length === 0) return emptyState("No Active Conversations", "Customer conversations will appear here once calls, emails, or messages are recorded.");
-  return `<div class="list">${items.map((conversation) => {
-    const isActive = activeConversationId === conversation.id || (!activeConversationId && items[0]?.id === conversation.id);
-    if (isActive && !activeConversationId) activeConversationId = conversation.id;
-    return `<div class="row ${isActive ? "active" : ""}" data-open-convo="${conversation.id}" style="cursor: pointer; ${isActive ? 'background: var(--surface-secondary);' : ''}">
-      <span class="row-main"><span class="row-title">${escapeHtml(conversation.customer)}</span><span class="meta">${conversation.channel} - ${conversation.intent} - Handled by ${conversation.handler}</span></span>
-      <span class="badge ${badgeClass(conversation.status)}">${conversation.status}</span>
-    </div>`;
-  }).join("")}</div>`;
+  return `<div class="list">${items.map((conversation) => `<div class="row">
+    <span class="row-main"><span class="row-title">${conversation.customer}</span><span class="meta">${conversation.channel} - ${conversation.intent} - handled by ${conversation.handler}</span></span>
+    <span class="badge ${badgeClass(conversation.status)}">${conversation.status}</span>
+  </div>`).join("")}</div>`;
 }
 
 function activityList() {
@@ -583,126 +628,16 @@ function activityList() {
 function conversationsPage(channel) {
   const title = channel || "Conversations";
   const filtered = channel ? conversationService.byChannel(channel) : conversationService.list();
-
-  if (channel === "WhatsApp" && !state.whatsappConnected) {
-    return shell(`
-      <div class="page-head">
-        <div class="page-copy">
-          <p class="eyebrow">WhatsApp Channel Setup</p>
-          <h1>Connect WhatsApp Business</h1>
-          <p>Link Walter to your business phone number so that it can interact with your clients directly on WhatsApp.</p>
-        </div>
-      </div>
-      <div class="grid two-col">
-        <section class="panel">
-          <h2>Scan QR Code</h2>
-          <p class="meta">Scan the QR code with your WhatsApp app (Settings > Linked Devices > Link a Device) to authorize Walter.</p>
-          <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding: 2rem; background: #fff; border: 1px solid var(--border); border-radius: 8px; margin-top: 1rem;">
-            <svg width="200" height="200" viewBox="0 0 100 100" style="margin-bottom:1.5rem; background:#fff; padding:10px; border:1px solid #ddd;">
-              <rect x="0" y="0" width="30" height="30" fill="#000"/>
-              <rect x="5" y="5" width="20" height="20" fill="#fff"/>
-              <rect x="10" y="10" width="10" height="10" fill="#000"/>
-              <rect x="70" y="0" width="30" height="30" fill="#000"/>
-              <rect x="75" y="5" width="20" height="20" fill="#fff"/>
-              <rect x="80" y="10" width="10" height="10" fill="#000"/>
-              <rect x="0" y="70" width="30" height="30" fill="#000"/>
-              <rect x="5" y="75" width="20" height="20" fill="#fff"/>
-              <rect x="10" y="80" width="10" height="10" fill="#000"/>
-              <rect x="40" y="20" width="10" height="40" fill="#000"/>
-              <rect x="50" y="50" width="20" height="10" fill="#000"/>
-              <rect x="40" y="70" width="20" height="20" fill="#000"/>
-              <rect x="70" y="70" width="15" height="15" fill="#000"/>
-            </svg>
-            <button class="btn primary" id="simulate-qr-scan">Simulate Phone Connection Scan</button>
-          </div>
-        </section>
-        <section class="panel">
-          <h2>Direct Link Setup</h2>
-          <p class="meta">Alternatively, connect by entering your WhatsApp phone number to receive a pairing code.</p>
-          <div class="auth-form" style="margin-top: 1rem;">
-            <label>WhatsApp Number
-              <input type="tel" class="input" id="whatsapp-num-input" placeholder="+1 (555) 000-0000">
-            </label>
-            <button class="btn secondary" id="whatsapp-pairing-btn" style="margin-top:10px;">Generate Pairing Code</button>
-          </div>
-        </section>
-      </div>
-    `);
-  }
-
-  const selectedConvo = filtered.find(c => c.id === activeConversationId) || filtered[0];
-
-  if (!selectedConvo) {
-    return shell(`
-      <div class="page-head">
-        <div class="page-copy">
-          <p class="eyebrow">Unified Conversation Center</p>
-          <h1>${title}</h1>
-        </div>
-      </div>
-      ${emptyState("No Active Conversations", "Chats will appear here once messages are recorded.")}
-    `);
-  }
-
-  const messagesList = (selectedConvo.messages || []).map(msg => {
-    const isAi = msg.senderType === 'AI';
-    const isStaff = msg.senderType === 'STAFF';
-    const align = isAi || isStaff ? 'right' : 'left';
-    const bg = isAi ? 'var(--primary)' : (isStaff ? '#eaeaea' : '#f0f0f0');
-    const color = isAi ? 'var(--primary-contrast)' : '#000';
-    return `<div style="display:flex; justify-content:${align === 'right' ? 'flex-end' : 'flex-start'}; margin-bottom:10px;">
-      <div style="background:	ext {bg}; color:	ext {color}; padding:8px 12px; border-radius:12px; max-width:70%;">
-        <div style="font-size:10px; opacity:0.75; margin-bottom:4px;">${msg.senderType}</div>
-        <div>${escapeHtml(msg.content)}</div>
-      </div>
-    </div>`;
-  }).join('');
-
-  return shell(`
-    <div class="page-head">
-      <div class="page-copy">
-        <p class="eyebrow">WhatsApp Channel Center</p>
-        <h1>WhatsApp Conversations</h1>
-      </div>
-      <div>
-        <span class="badge success" style="margin-right:10px;">WhatsApp Active</span>
-        <button class="btn danger" id="disconnect-whatsapp-btn">Disconnect Number</button>
-      </div>
-    </div>
-    <div class="grid two-col" style="grid-template-columns: 1fr 2fr;">
-      <section class="panel">
-        <div class="panel-head">
-          <div>
-            <h2>Inbox</h2>
-            <p class="meta">${filtered.length} active chats.</p>
-          </div>
-        </div>
-        ${conversationList(filtered)}
-      </section>
-      <section class="panel" style="display:flex; flex-direction:column; min-height: 60vh;">
-        <div class="panel-head" style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border); padding-bottom:10px; margin-bottom: 10px;">
-          <div>
-            <h2>${escapeHtml(selectedConvo.customer)}</h2>
-            <p class="meta">Status: <span class="badge ${badgeClass(selectedConvo.status)}">${selectedConvo.status}</span></p>
-          </div>
-          <div>
-            <label style="display:inline-flex; align-items:center; gap:8px; font-weight:500; font-size:13px; cursor:pointer;">
-              <span>Handled by AI (${assistantName})</span>
-              <input type="checkbox" id="takeover-toggle" ${selectedConvo.handler === 'Staff' ? 'checked' : ''} style="cursor:pointer;">
-              <span>Takeover (Owner)</span>
-            </label>
-          </div>
-        </div>
-        <div class="chat-messages" style="flex:1; overflow-y:auto; padding:15px 0;" id="chat-messages-container">
-          ${messagesList}
-        </div>
-        <form id="chat-reply-form" style="display:flex; gap:10px; border-top:1px solid var(--border); padding-top:10px;">
-          <input type="text" class="input" id="chat-reply-input" placeholder="Type a reply as ${selectedConvo.handler === 'Staff' ? 'Owner (Human)' : 'Walter (AI mockup)'}..." required style="flex:1;">
-          <button class="btn primary" type="submit">Send</button>
-        </form>
-      </section>
-    </div>
-  `);
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Unified Conversation Center</p><h1>${title}</h1><p>Each conversation shows customer intent, channel, handler, status, and the outcome ${assistantName} produced or escalated.</p></div><button class="btn">Transfer Selected To Human</button></div>
+  <div class="grid two-col">
+    <section class="panel"><div class="panel-head"><div><h2>Inbox</h2><p class="meta">${filtered.length} conversations in view.</p></div></div>${conversationList(filtered)}</section>
+    <section class="panel"><div class="panel-head"><div><h2>Conversation Detail</h2><p class="meta">Select a conversation to review transcript context.</p></div></div><div class="detail-stack">
+      <p><strong>Intent:</strong> ${filtered[0]?.intent || "No conversation selected"}</p>
+      <p><strong>Result:</strong> ${filtered[0]?.result || "Conversation outcomes will appear here."}</p>
+      <p><strong>Customer:</strong> ${filtered[0]?.customer || "None selected"}</p>
+      <button class="btn">Review transcript</button>
+    </div></section>
+  </div>`);
 }
 
 function callsPage() {
@@ -742,11 +677,7 @@ function customerForm() {
       <label>Segment<select class="select" id="customer-segment">${["Standard", "High value", "Needs confirmation", "No-show risk", "New lead"].map((segment) => `<option ${segment === (customer?.segment || "Standard") ? "selected" : ""}>${segment}</option>`).join("")}</select></label>
       <label>Notes<textarea class="input textarea" id="customer-notes">${escapeHtml(customer?.notes || "")}</textarea></label>
       <div class="form-error" id="customer-error" hidden></div>
-      
-      <div style="display: flex; gap: 10px; justify-content: space-between; width: 100%;">
-        <button class="btn primary" type="submit">${isEditing ? "Save Customer" : "Create Customer"}</button>
-        ${isEditing ? `<button class="btn danger" type="button" id="delete-customer-btn">Delete Customer</button>` : ""}
-      </div>
+      <button class="btn primary" type="submit">${isEditing ? "Save Customer" : "Create Customer"}</button>
     </form>
   </div>`;
 }
@@ -780,13 +711,18 @@ function staffPage() {
 }
 
 function automationPage() {
-  const rules = [
+  const rules = automationRuleService.list();
+  
+  const fallbackRules = [
     ["Confirmation Chase", "Send a reminder when an appointment is still pending 24 hours before start time.", "Ready"],
     ["No-Show Watch", "Flag customers with repeated missed appointments for staff review.", "Monitoring"],
     ["Human Escalation", "Move pricing disputes, medical questions, and unclear requests out of automation.", "Protected"],
   ];
+  
+  const displayRules = rules.length > 0 ? rules.map(r => [r.name, `${r.triggerEvent} -> ${r.actionType}`, r.active ? 'Active' : 'Inactive']) : fallbackRules;
+  
   return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Automation Rules</p><h1>Automation Rules</h1><p>Control where ${assistantName} acts automatically and where your team stays in the loop.</p></div><button class="btn primary" data-action="save">New Rule</button></div>
-  <div class="grid three-col">${rules.map(([name, detail, status]) => `<article class="card"><div class="card-top"><h3>${name}</h3><span class="badge success">${status}</span></div><p>${detail}</p><div class="rule-flow"><span>Trigger</span><span>Condition</span><span>Action</span></div></article>`).join("")}</div>`);
+  <div class="grid three-col">${displayRules.map(([name, detail, status]) => `<article class="card"><div class="card-top"><h3>${name}</h3><span class="badge ${status === 'Inactive' ? '' : 'success'}">${status}</span></div><p>${detail}</p><div class="rule-flow"><span>Trigger</span><span>Condition</span><span>Action</span></div></article>`).join("")}</div>`);
 }
 
 function assistantPage() {
@@ -806,20 +742,36 @@ function assistantPage() {
 }
 
 function integrationsPage() {
-  const integrations = [
-    ["Calendar", "Sync staff availability and push confirmed appointments.", "Not Connected"],
-    ["Phone", `Route inbound calls through ${assistantName}.`, "Not Connected"],
-    ["Messaging", "Unify WhatsApp and email conversations.", state.whatsappConnected ? "Connected" : "Not Connected"],
-    ["Payments", "Attach deposits and invoices to booked services.", "Planned"],
+  const activeIntegrations = integrationService.list();
+  
+  const baseIntegrations = [
+    { name: "Calendar", detail: "Sync staff availability and push confirmed appointments.", id: "calendar" },
+    { name: "Phone", detail: `Route inbound calls through ${assistantName}.`, id: "phone" },
+    { name: "Messaging", detail: "Unify WhatsApp and email conversations.", id: "messaging" },
+    { name: "Payments", detail: "Attach deposits and invoices to booked services.", id: "payments" },
   ];
+
+  const displayIntegrations = baseIntegrations.map(base => {
+    const active = activeIntegrations.find(i => i.provider.toLowerCase() === base.id);
+    if (active) {
+      return [base.name, base.detail, active.enabled ? "Connected" : "Paused", active.enabled ? "success" : ""];
+    }
+    return [base.name, base.detail, "Not Connected", ""];
+  });
+
   return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Connected Channels</p><h1>Integrations</h1><p>Connect the systems that feed appointment requests into the same backend workflow.</p></div><button class="btn primary" data-action="save">Connect App</button></div>
-  <div class="grid four-col">${integrations.map(([name, detail, status]) => `<article class="card integration-card"><h3>${name}</h3><p>${detail}</p><span class="badge">${status}</span></article>`).join("")}</div>`);
+  <div class="grid four-col">${displayIntegrations.map(([name, detail, status, badgeCls]) => `<article class="card integration-card"><h3>${name}</h3><p>${detail}</p><span class="badge ${badgeCls}">${status}</span></article>`).join("")}</div>`);
 }
 
 function billingPage() {
+  const sub = billingService.getSubscription();
+  const planName = sub?.plan || "Setup Needed";
+  const statusBadge = sub?.status === "ACTIVE" ? "success" : "warning";
+  const balance = "$0";
+
   return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Plan And Usage</p><h1>Billing</h1><p>Track subscription status, receptionist usage, and billing controls for this workspace.</p></div><button class="btn primary" data-action="save">Manage Plan</button></div>
   <div class="grid two-col">
-    <section class="panel"><div class="panel-head"><div><h2>Current Plan</h2><p class="meta">Workspace billing summary.</p></div><span class="badge warning">Setup Needed</span></div><div class="metric-strip billing-metrics">${metric("Starter", "Plan")}${metric("$0", "Current balance")}</div></section>
+    <section class="panel"><div class="panel-head"><div><h2>Current Plan</h2><p class="meta">Workspace billing summary.</p></div><span class="badge ${statusBadge}">${sub?.status || 'Setup Needed'}</span></div><div class="metric-strip billing-metrics">${metric(planName, "Plan")}${metric(balance, "Current balance")}</div></section>
     <section class="panel"><div class="panel-head"><div><h2>Usage Controls</h2><p class="meta">Protect costs while call volume grows.</p></div></div><div class="setting-list">
       ${settingRow("Monthly Call Limit", "Set a cap before overage billing begins", "Unset")}
       ${settingRow("SMS Reminders", "Bill only when reminders are enabled", "Available")}
@@ -957,116 +909,10 @@ function attachFormListeners() {
       }
     });
   }
-
-  const deleteCustomerBtn = document.getElementById("delete-customer-btn");
-  if (deleteCustomerBtn) {
-    deleteCustomerBtn.addEventListener("click", async () => {
-      if (!confirm("Are you sure you want to delete this customer? This will also delete their appointments.")) return;
-      try {
-        await customerService.delete(customerEditor);
-        showToast("Customer deleted successfully.");
-        customerEditor = null;
-        render();
-      } catch (err) {
-        showToast(err.message || "Failed to delete customer");
-      }
-    });
-  }
-
-  // WhatsApp Simulate Connection
-  const simulateScanBtn = document.getElementById("simulate-qr-scan");
-  if (simulateScanBtn) {
-    simulateScanBtn.addEventListener("click", () => {
-      localStorage.setItem("whatsapp_connected", "true");
-      state.whatsappConnected = true;
-      showToast("WhatsApp successfully connected!");
-      render();
-    });
-  }
-
-  const disconnectWhatsappBtn = document.getElementById("disconnect-whatsapp-btn");
-  if (disconnectWhatsappBtn) {
-    disconnectWhatsappBtn.addEventListener("click", () => {
-      localStorage.removeItem("whatsapp_connected");
-      state.whatsappConnected = false;
-      showToast("WhatsApp disconnected.");
-      render();
-    });
-  }
-
-  // Conversation open
-  document.querySelectorAll("[data-open-convo]").forEach((element) => {
-    element.addEventListener("click", () => {
-      activeConversationId = element.dataset.openConvo;
-      render();
-    });
-  });
-
-  // Handler Takeover Toggle
-  const takeoverToggle = document.getElementById("takeover-toggle");
-  if (takeoverToggle) {
-    takeoverToggle.addEventListener("change", async (e) => {
-      const handlerVal = e.target.checked ? "Staff" : assistantName;
-      try {
-        await apiCall(`/conversations/${activeConversationId}`, "PATCH", {
-          handler: handlerVal,
-          status: e.target.checked ? "Human review" : "Resolved"
-        });
-        showToast(e.target.checked ? "Owner took over the chat." : "Handover back to Walter AI.");
-        await stateManager.loadAll();
-        render();
-      } catch (err) {
-        showToast(err.message || "Failed to update handler");
-      }
-    });
-  }
-
-  // Chat reply form
-  const chatReplyForm = document.getElementById("chat-reply-form");
-  if (chatReplyForm) {
-    chatReplyForm.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const input = document.getElementById("chat-reply-input");
-      const contentStr = input.value.trim();
-      if (!contentStr) return;
-
-      const filtered = conversationService.byChannel("WhatsApp");
-      const selectedConvo = filtered.find(c => c.id === activeConversationId) || filtered[0];
-      const senderType = selectedConvo.handler === 'Staff' ? 'STAFF' : 'AI';
-
-      try {
-        await apiCall(`/conversations/${selectedConvo.id}/messages`, "POST", {
-          senderType,
-          content: contentStr
-        });
-
-        input.value = '';
-        await stateManager.loadAll();
-        render();
-
-        if (selectedConvo.handler !== 'Staff') {
-          setTimeout(async () => {
-            try {
-              await apiCall(`/conversations/${selectedConvo.id}/messages`, "POST", {
-                senderType: 'CUSTOMER',
-                content: "Sure, let's proceed with that."
-              });
-              await stateManager.loadAll();
-              render();
-            } catch (err) {}
-          }, 1500);
-        }
-      } catch (err) {
-        showToast(err.message || "Failed to send message");
-      }
-    });
-  }
-
 }
 
 async function render() {
   app.innerHTML = pageForRoute();
-  updateClock();
   attachFormListeners();
 
   document.querySelectorAll("[data-route]").forEach((element) => element.addEventListener("click", () => navigate(element.dataset.route)));
@@ -1075,249 +921,108 @@ async function render() {
     render();
   }));
 
-  document.querySelectorAll("[data-action]").forEach((element) => element.addEventListener("click", async () => {
-    const action = element.dataset.action;
-    const apptId = element.dataset.id || drawerAppointment;
+  // Generic action dispatcher for all UI buttons
+  document.querySelectorAll("[data-action]").forEach((element) => {
+    element.addEventListener("click", async () => {
+      const action = element.dataset.action;
+      const apptId = element.dataset.id; // May be undefined for non-appointment actions
 
-    if (action === "close") {
-      drawerAppointment = null;
-      render();
-      return;
-    }
-
-    if (action === "close-customer") {
-      customerEditor = null;
-      render();
-      return;
-    }
-
-    if (action === "customer") {
-      currentRoute = "customers";
-      location.hash = "/customers";
-      customerEditor = "new";
-      render();
-      return;
-    }
-
-    if (action === "edit-customer") {
-      customerEditor = element.dataset.id;
-      render();
-      return;
-    }
-
-    if (action === "confirm-appt" && apptId) {
-      try {
-        await appointmentService.confirm(apptId);
-        showToast("Appointment confirmed!");
-      } catch (e) { showToast(e.message); }
-      return;
-    }
-
-    if (action === "cancel-appt" && apptId) {
-      if (!confirm("Cancel this appointment?")) return;
-      try {
-        await appointmentService.cancel(apptId);
-        drawerAppointment = null;
-        showToast("Appointment cancelled.");
-      } catch (e) { showToast(e.message); }
-      return;
-    }
-
-    if (action === "reschedule-appt" && apptId) {
-      const newTime = prompt("Enter new date & time (e.g. 2026-08-17T15:30:00.000Z):", new Date().toISOString());
-      if (newTime) {
-        try {
-          await appointmentService.reschedule(apptId, newTime);
-          showToast("Appointment rescheduled!");
-        } catch (e) { showToast(e.message); }
+      if (action === "close-customer") {
+        customerEditor = null;
+        render();
+        return;
       }
-      return;
-    }
 
-    if (action === "book") {
-      showBookingDialog();
-      return;
-    }
+      if (action === "customer") {
+        currentRoute = "customers";
+        location.hash = "/customers";
+        customerEditor = "new";
+        render();
+        return;
+      }
 
-    showToast(notificationService.messageFor(action));
-  }));
-}
+      if (action === "edit-customer") {
+        customerEditor = element.dataset.id;
+        render();
+        return;
+      }
 
+      if (action === "confirm-appt" && apptId) {
+        try {
+          await appointmentService.confirm(apptId);
+          showToast("Appointment confirmed!");
+        } catch (e) {
+          showToast(e.message);
+        }
+        return;
+      }
 
-function bookingModal(date, slots) {
-  const customerOptions = state.customers.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
-  const serviceOptions = state.services.map(s => `<option value="${s.id}">${escapeHtml(s.name)} ($${s.price})</option>`).join('');
-  const staffOptions = state.staff.map(st => `<option value="${st.id}">${escapeHtml(st.name)}</option>`).join('');
+      if (action === "cancel-appt" && apptId) {
+        if (!confirm("Cancel this appointment?")) return;
+        try {
+          await appointmentService.cancel(apptId);
+          drawerAppointment = null;
+          showToast("Appointment cancelled.");
+        } catch (e) {
+          showToast(e.message);
+        }
+        return;
+      }
 
-  return `
-    <div class="modal-backdrop open" role="dialog" aria-modal="true" style="z-index: 1000;">
-      <div class="modal-panel auth-form" style="max-height: 90vh; overflow-y: auto;">
-        <div class="page-head compact">
-          <div class="page-copy">
-            <p class="eyebrow">New Appointment</p>
-            <h2>Book Appointment</h2>
-          </div>
-          <button class="btn" type="button" id="cancel-booking">Close</button>
-        </div>
-        
-        <label for="booking-customer">Customer</label>
-        <select id="booking-customer" class="select" required>
-          <option value="">-- Select Customer --</option>
-          ${customerOptions}
-        </select>
-        
-        <label for="booking-service">Service</label>
-        <select id="booking-service" class="select" required>
-          <option value="">-- Select Service --</option>
-          ${serviceOptions}
-        </select>
-        
-        <label for="booking-staff">Staff</label>
-        <select id="booking-staff" class="select">
-          <option value="">-- Select Staff (Optional) --</option>
-          ${staffOptions}
-        </select>
+      if (action === "reschedule-appt" && apptId) {
+        const newTime = prompt("Enter new date & time (e.g. 2026-08-17T15:30:00.000Z):", new Date().toISOString());
+        if (newTime) {
+          try {
+            await appointmentService.reschedule(apptId, newTime);
+            showToast("Appointment rescheduled!");
+          } catch (e) {
+            showToast(e.message);
+          }
+        }
+        return;
+      }
 
-        <label for="booking-date">Date</label>
-        <input type="date" id="booking-date" class="input" value="${date}" min="${new Date().toISOString().split('T')[0]}" required />
-        
-        <label>Time Slot</label>
-        <div class="slot-grid" id="booking-slots-grid" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 15px;">
-          ${slots.map(slot => `
-            <button class="slot-btn" type="button" data-time="	ext {slot}">${slot}</button>
-          `).join('')}
-        </div>
-        
-        <div class="modal-actions" style="display: flex; gap: 10px; justify-content: flex-end;">
-          <button class="btn primary" id="confirm-booking" type="button">Confirm</button>
-          <button class="btn" id="cancel-booking-btn" type="button">Cancel</button>
-        </div>
-      </div>
-    </div>`;
-}
+      if (action === "book") {
+        const custName = prompt("Customer Name:");
+        if (!custName) return;
+        try {
+          const custs = await apiCall("/customers");
+          const srvs = await apiCall("/services");
+          const stff = await apiCall("/staff");
 
-function showBookingDialog() {
-  const today = new Date().toISOString().split('T')[0];
-  const availableSlots = getAvailableSlots(new Date());
-  
-  let modalRoot = document.getElementById('modal-root');
-  if (!modalRoot) {
-    modalRoot = document.createElement('div');
-    modalRoot.id = 'modal-root';
-    document.body.appendChild(modalRoot);
-  }
-  
-  modalRoot.innerHTML = bookingModal(today, availableSlots);
-  attachBookingDialogListeners();
-}
+          const normalizedName = custName.trim();
+          const targetCust =
+            custs.find((c) => c.name.toLowerCase() === normalizedName.toLowerCase()) ||
+            (await apiCall("/customers", "POST", { name: normalizedName, segment: "New lead" }));
+          const targetSrv = srvs[0];
+          const targetStff = stff[0];
 
-function hideBookingDialog() {
-  const modalRoot = document.getElementById('modal-root');
-  if (modalRoot) {
-    modalRoot.innerHTML = '';
-  }
-}
+          if (!targetSrv) throw new Error("Create a service before booking appointments.");
 
-function getAvailableSlots(dateObj) {
-  const slots = [];
-  const start = new Date(dateObj);
-  start.setHours(9, 0, 0, 0);
-  const end = new Date(dateObj);
-  end.setHours(17, 0, 0, 0);
-  for (let t = new Date(start); t < end; t.setMinutes(t.getMinutes() + 15)) {
-    const overlap = state.appointments.some(appt => {
-      const apptDate = new Date(appt.startTime);
-      return apptDate.toDateString() === dateObj.toDateString() &&
-             Math.abs(apptDate - t) < 15 * 60 * 1000;
+          const tomorrow = new Date();
+          tomorrow.setDate(tomorrow.getDate() + 1);
+          tomorrow.setHours(10, 0, 0, 0);
+
+          await appointmentService.book({
+            customerId: targetCust.id,
+            serviceId: targetSrv.id,
+            staffId: targetStff?.id,
+            startTime: tomorrow.toISOString(),
+            channel: "web",
+            notes: "Booked from dashboard button",
+          });
+
+          showToast("New appointment booked!");
+        } catch (e) {
+          showToast(e.message || "Failed to book appointment");
+        }
+        return;
+      }
+
+      // Fallback for other actions – use notification service messages
+      showToast(notificationService.messageFor(action));
     });
-    if (!overlap) {
-      slots.push(t.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }));
-    }
-  }
-  return slots;
-}
-
-function attachBookingDialogListeners() {
-  const modal = document.querySelector('.modal-backdrop');
-  if (!modal) return;
-  const dateInput = modal.querySelector('#booking-date');
-  const slotContainer = modal.querySelector('#booking-slots-grid');
-  const confirmBtn = modal.querySelector('#confirm-booking');
-  const cancelBtn = modal.querySelector('#cancel-booking');
-  const cancelBtn2 = modal.querySelector('#cancel-booking-btn');
-
-  dateInput.addEventListener('change', () => {
-    const selectedDate = new Date(dateInput.value);
-    const today = new Date();
-    if (selectedDate < new Date(today.toDateString())) {
-      showToast('Cannot book in the past');
-      dateInput.value = today.toISOString().split('T')[0];
-      return;
-    }
-    const newSlots = getAvailableSlots(selectedDate);
-    slotContainer.innerHTML = newSlots.map(s => `<button class="slot-btn" type="button" data-time="${s}">${s}</button>`).join('');
   });
-
-  slotContainer.addEventListener('click', e => {
-    if (e.target.matches('.slot-btn')) {
-      slotContainer.querySelectorAll('.slot-btn').forEach(btn => btn.classList.remove('selected'));
-      e.target.classList.add('selected');
-    }
-  });
-
-  confirmBtn.addEventListener('click', async () => {
-    const customerId = modal.querySelector('#booking-customer').value;
-    const serviceId = modal.querySelector('#booking-service').value;
-    const staffId = modal.querySelector('#booking-staff').value || null;
-    const selectedDate = dateInput.value;
-    const selectedSlotBtn = slotContainer.querySelector('.slot-btn.selected');
-    
-    if (!customerId) {
-      showToast('Please select a customer');
-      return;
-    }
-    if (!serviceId) {
-      showToast('Please select a service');
-      return;
-    }
-    if (!selectedSlotBtn) {
-      showToast('Please select a time slot');
-      return;
-    }
-
-    const timeStr = selectedSlotBtn.dataset.time;
-    const [time, modifier] = timeStr.split(' ');
-    let [hours, minutes] = time.split(':');
-    if (hours === '12') {
-      hours = '00';
-    }
-    if (modifier === 'PM') {
-      hours = parseInt(hours, 10) + 12;
-    }
-    const dt = new Date(selectedDate);
-    dt.setHours(hours, minutes, 0, 0);
-
-    const payload = {
-      startTime: dt.toISOString(),
-      serviceId,
-      staffId,
-      customerId,
-      channel: 'web'
-    };
-
-    try {
-      await appointmentService.book(payload);
-      showToast(`Booked appointment successfully!`);
-      hideBookingDialog();
-      render();
-    } catch (err) {
-      showToast(err.message || 'Failed to book appointment');
-    }
-  });
-
-  const closeDialog = () => hideBookingDialog();
-  if (cancelBtn) cancelBtn.addEventListener('click', closeDialog);
-  if (cancelBtn2) cancelBtn2.addEventListener('click', closeDialog);
 }
 
 // Boot sequence: check session & load state
@@ -1329,28 +1034,3 @@ function attachBookingDialogListeners() {
     render();
   }
 })();
-
-function updateClock() {
-  const clockEl = document.getElementById("header-clock");
-  if (clockEl) {
-    const tz = (currentUser && currentUser.business && currentUser.business.timezone) || "America/New_York";
-    try {
-      clockEl.textContent = new Date().toLocaleTimeString("en-US", {
-        timeZone: tz,
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true
-      });
-    } catch (e) {
-      clockEl.textContent = new Date().toLocaleTimeString("en-US", {
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true
-      });
-    }
-  }
-}
-
-updateClock();
-setInterval(updateClock, 1000);
-

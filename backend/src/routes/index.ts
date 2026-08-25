@@ -8,16 +8,7 @@ import { AIToolLayer } from '../modules/ai/aiToolLayer.js';
 import { ConversationService } from '../modules/conversations/conversationService.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { handleAsteriskWebhook } from '../modules/voice/voiceController.js';
-// Helper to retrieve a business ID for webhook processing (fallback to first business)
-async function getBusinessIdFromWebhook(req) {
-  // Try to read a custom header set by the client, else fallback
-  const headerId = req.headers['x-business-id'];
-  if (headerId) return String(headerId);
-  const firstBusiness = await prisma.business.findFirst();
-  if (!firstBusiness) throw new Error('No business found for webhook processing');
-  return firstBusiness.id;
-}
-
+import { VoiceProviderManager } from '../modules/voice/voiceProviderManager.js';
 export const apiRouter = Router();
 
 // -------------------------------------------------------------
@@ -446,24 +437,6 @@ apiRouter.patch('/customers/:id', async (req: AuthenticatedRequest, res, next) =
   }
 });
 
-apiRouter.delete('/customers/:id', async (req: AuthenticatedRequest, res, next) => {
-  try {
-    const tenantId = getTenantId(req);
-    const customer = await prisma.customer.findFirst({
-      where: { id: req.params.id, businessId: tenantId },
-    });
-    if (!customer) throw new AppError('Customer not found', 404);
-
-    await prisma.customer.delete({
-      where: { id: req.params.id },
-    });
-    return res.status(204).end();
-  } catch (err) {
-    next(err);
-  }
-});
-
-
 apiRouter.get('/services', async (req: AuthenticatedRequest, res, next) => {
   try {
     const tenantId = getTenantId(req);
@@ -541,44 +514,6 @@ apiRouter.get('/conversations', async (req: AuthenticatedRequest, res, next) => 
     next(err);
   }
 });
-
-apiRouter.patch('/conversations/:id', async (req: AuthenticatedRequest, res, next) => {
-  try {
-    const tenantId = getTenantId(req);
-    const { handler, status } = req.body;
-    
-    const conversation = await prisma.conversation.findFirst({
-      where: { id: req.params.id, businessId: tenantId },
-    });
-    if (!conversation) throw new AppError('Conversation not found', 404);
-
-    const updated = await prisma.conversation.update({
-      where: { id: req.params.id },
-      data: {
-        ...(handler !== undefined && { handler }),
-        ...(status !== undefined && { status }),
-      },
-    });
-    return res.json(updated);
-  } catch (err) {
-    next(err);
-  }
-});
-
-apiRouter.post('/conversations/:id/messages', async (req: AuthenticatedRequest, res, next) => {
-  try {
-    const tenantId = getTenantId(req);
-    const { senderType, content } = req.body;
-    if (!content) throw new AppError('Message content is required', 400);
-
-    const message = await ConversationService.addMessage(tenantId, req.params.id, senderType, content);
-    return res.status(201).json(message);
-  } catch (err) {
-    next(err);
-  }
-});
-
-
 
 apiRouter.get('/calls', async (req: AuthenticatedRequest, res, next) => {
   try {
@@ -700,6 +635,135 @@ apiRouter.patch('/business/settings', async (req: AuthenticatedRequest, res, nex
 });
 
 // -------------------------------------------------------------
+// 7B. DYNAMIC CONFIGURATION (Automation, Integrations, Billing)
+// -------------------------------------------------------------
+
+apiRouter.get('/automation-rules', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const rules = await prisma.automationRule.findMany({ where: { businessId: tenantId } });
+    return res.json(rules);
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.post('/automation-rules', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const rule = await prisma.automationRule.create({
+      data: { ...req.body, businessId: tenantId }
+    });
+    return res.json(rule);
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.patch('/automation-rules/:id', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const rule = await prisma.automationRule.update({
+      where: { id: req.params.id, businessId: tenantId },
+      data: req.body
+    });
+    return res.json(rule);
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.delete('/automation-rules/:id', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    await prisma.automationRule.delete({
+      where: { id: req.params.id, businessId: tenantId }
+    });
+    return res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.get('/integrations', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const integrations = await prisma.integration.findMany({ where: { businessId: tenantId } });
+    return res.json(integrations);
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.post('/integrations', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const integration = await prisma.integration.create({
+      data: { ...req.body, businessId: tenantId }
+    });
+    return res.json(integration);
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.patch('/integrations/:id', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const integration = await prisma.integration.update({
+      where: { id: req.params.id, businessId: tenantId },
+      data: req.body
+    });
+    return res.json(integration);
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.delete('/integrations/:id', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    await prisma.integration.delete({
+      where: { id: req.params.id, businessId: tenantId }
+    });
+    return res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.get('/billing/subscription', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const subscription = await prisma.subscription.findFirst({ where: { businessId: tenantId } });
+    return res.json(subscription);
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.patch('/billing/subscription', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const existing = await prisma.subscription.findFirst({ where: { businessId: tenantId } });
+    let subscription;
+    if (existing) {
+      subscription = await prisma.subscription.update({
+        where: { id: existing.id },
+        data: req.body
+      });
+    } else {
+      subscription = await prisma.subscription.create({
+        data: { ...req.body, businessId: tenantId }
+      });
+    }
+    return res.json(subscription);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// -------------------------------------------------------------
 // 8. CONTROLLED AI TOOL LAYER
 // -------------------------------------------------------------
 
@@ -729,115 +793,11 @@ apiRouter.post('/ai/tools/execute', async (req: AuthenticatedRequest, res, next)
 
 apiRouter.post('/webhooks/voice/asterisk', handleAsteriskWebhook);
 
-// WhatsApp Cloud API integration
-// Environment variables (loaded from .env or process.env)
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN || '';
-const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID || '';
-const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || '';
-
-// Helper to send a WhatsApp message via Meta Cloud API
-async function sendWhatsAppMessage(to, body) {
-  const url = `https://graph.facebook.com/v15.0/${WHATSAPP_PHONE_ID}/messages`;
-  const payload = {
-    messaging_product: 'whatsapp',
-    to,
-    text: { body },
-  };
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
-  if (!response.ok) {
-    const errText = await response.text();
-    console.error('WhatsApp send error:', response.status, errText);
-    throw new Error('Failed to send WhatsApp message');
-  }
-  return response.json();
-}
-
-// Webhook verification (GET) and inbound message handling (POST)
-apiRouter.get('/webhooks/whatsapp', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-  if (mode === 'subscribe' && token === WEBHOOK_VERIFY_TOKEN) {
-    console.log('WhatsApp webhook verified');
-    res.send(challenge);
-  } else {
-    res.sendStatus(403);
-  }
-});
-
 apiRouter.post('/webhooks/whatsapp', async (req, res, next) => {
   try {
-    // Meta webhook payload structure
-    const entry = req.body.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value = changes?.value;
-    const messages = value?.messages?.[0];
-    if (!messages) {
-      return res.json({ status: 'no_message' });
-    }
-    const from = messages.from; // phone number of sender
-    const text = messages.text?.body || '';
-    console.log(`[WhatsAppWebhook] Received message from ${from}: ${text}`);
-
-    // Find or create a whatsapp conversation linked to this phone number
-    const businessId = getTenantId({ headers: req.headers } as any); // fallback tenant inference
-    // Look for existing conversation with this phone as customer phone
-    let conversation = await prisma.conversation.findFirst({
-      where: { businessId, channel: 'whatsapp' },
-      include: { customer: true },
-    });
-    if (!conversation) {
-      // Create a placeholder customer if needed
-      const customer = await prisma.customer.create({
-        data: { businessId, phone: from, name: `WhatsApp ${from}` },
-      });
-      conversation = await prisma.conversation.create({
-        data: {
-          businessId,
-          channel: 'whatsapp',
-          customerId: customer.id,
-          handler: 'assistant',
-        },
-      });
-    }
-    // Store inbound message
-    await ConversationService.addMessage(businessId, conversation.id, 'customer', text);
-    res.json({ status: 'stored' });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// Extend existing message endpoint to forward to WhatsApp when the handler is owner
-apiRouter.post('/conversations/:id/messages', async (req: AuthenticatedRequest, res, next) => {
-  try {
-    const tenantId = getTenantId(req);
-    const { senderType, content } = req.body;
-    if (!content) throw new AppError('Message content is required', 400);
-
-    const message = await ConversationService.addMessage(tenantId, req.params.id, senderType, content);
-
-    // If the conversation is being handled by the owner (human), forward to WhatsApp
-    const conv = await prisma.conversation.findUnique({ where: { id: req.params.id } });
-    if (conv && conv.handler === 'owner' && conv.channel === 'whatsapp') {
-      const phone = conv.customer?.phone;
-      if (phone) {
-        try {
-          await sendWhatsAppMessage(phone, content);
-        } catch (e) {
-          console.error('Failed to forward message to WhatsApp', e);
-        }
-      }
-    }
-
-    return res.status(201).json(message);
+    const { from, message } = req.body;
+    console.log(`[WhatsAppWebhook] Received WhatsApp message from ${from}`);
+    return res.json({ status: 'received' });
   } catch (err) {
     next(err);
   }
