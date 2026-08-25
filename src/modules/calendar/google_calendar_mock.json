@@ -1,0 +1,35 @@
+[
+  {
+    "id": "mock_event_1",
+    "summary": "Google: Design System Sync",
+    "description": "Weekly alignment on styling and interface components",
+    "start": {
+      "dateTime": "2026-08-24T14:00:00.000Z"
+    },
+    "end": {
+      "dateTime": "2026-08-24T15:30:00.000Z"
+    }
+  },
+  {
+    "id": "mock_event_2",
+    "summary": "Google: Dental Checkup",
+    "description": "Routine dentist appointment",
+    "start": {
+      "dateTime": "2026-08-25T09:00:00.000Z"
+    },
+    "end": {
+      "dateTime": "2026-08-25T10:00:00.000Z"
+    }
+  },
+  {
+    "id": "mock_event_3",
+    "summary": "Google: Personal Errands",
+    "description": "Blocked out time for personal chores",
+    "start": {
+      "dateTime": "2026-08-26T16:00:00.000Z"
+    },
+    "end": {
+      "dateTime": "2026-08-26T17:30:00.000Z"
+    }
+  }
+]

@@ -1,5 +1,6 @@
 import { prisma } from '../../db/prisma.js';
 import { AppError } from '../../middleware/errorHandler.js';
+import { CalendarSyncEngine } from '../calendar/calendarAdapter.js';
 
 export interface CreateAppointmentInput {
   businessId: string;
@@ -143,6 +144,13 @@ export class AppointmentEngine {
       return created;
     });
 
+    // Synchronize with external calendar asynchronously
+    try {
+      await CalendarSyncEngine.syncAppointmentToCalendar(businessId, appointment);
+    } catch (e) {
+      console.error('Failed to sync appointment on creation:', e);
+    }
+
     return appointment;
   }
 
@@ -207,6 +215,13 @@ export class AppointmentEngine {
       return res;
     });
 
+    // Synchronize with external calendar asynchronously
+    try {
+      await CalendarSyncEngine.syncAppointmentToCalendar(businessId, updated);
+    } catch (e) {
+      console.error('Failed to sync rescheduled appointment:', e);
+    }
+
     return updated;
   }
 
@@ -246,6 +261,15 @@ export class AppointmentEngine {
       return res;
     });
 
+    // Delete/cancel from external calendar if synchronized
+    if (cancelled.googleCalendarEventId) {
+      try {
+        await CalendarSyncEngine.deleteAppointmentFromCalendar(businessId, cancelled.googleCalendarEventId);
+      } catch (e) {
+        console.error('Failed to cancel Google Calendar event on cancellation:', e);
+      }
+    }
+
     return cancelled;
   }
 
@@ -259,8 +283,8 @@ export class AppointmentEngine {
 
     if (!existing) throw new AppError('Appointment not found', 404);
 
-    return prisma.$transaction(async (tx) => {
-      const updated = await tx.appointment.update({
+    const updated = await prisma.$transaction(async (tx) => {
+      const res = await tx.appointment.update({
         where: { id: appointmentId },
         data: { status },
         include: { customer: true, service: true, staff: true },
@@ -268,7 +292,7 @@ export class AppointmentEngine {
 
       await tx.appointmentStatusHistory.create({
         data: {
-          appointmentId: updated.id,
+          appointmentId: res.id,
           previousStatus: existing.status,
           newStatus: status,
           changedBy,
@@ -276,7 +300,25 @@ export class AppointmentEngine {
         },
       });
 
-      return updated;
+      return res;
     });
+
+    if (status === 'cancelled') {
+      if (updated.googleCalendarEventId) {
+        try {
+          await CalendarSyncEngine.deleteAppointmentFromCalendar(businessId, updated.googleCalendarEventId);
+        } catch (e) {
+          console.error('Failed to delete Google Calendar event on cancel status update:', e);
+        }
+      }
+    } else {
+      try {
+        await CalendarSyncEngine.syncAppointmentToCalendar(businessId, updated);
+      } catch (e) {
+        console.error('Failed to sync status update to Google Calendar:', e);
+      }
+    }
+
+    return updated;
   }
 }

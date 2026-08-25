@@ -75,6 +75,13 @@ let state = {
   dashboardSummary: null,
   analytics: null,
   businessSettings: null,
+  calendarEvents: [],
+  calendarView: "month", // month, week, day
+  calendarDate: new Date("2026-08-23T12:00:00"),
+  calendarFilterStaff: "",
+  calendarFilterService: "",
+  calendarFilterSource: "",
+  googleCalendarIntegration: null,
   loading: false,
   error: null,
 };
@@ -239,14 +246,29 @@ const notificationService = {
   messageFor: (action) => `${titleCase(action)} request processed by backend engine.`,
 };
 
+async function fetchCalendarEvents() {
+  if (!currentToken) return;
+  const year = state.calendarDate.getFullYear();
+  const month = state.calendarDate.getMonth();
+  const start = new Date(year, month, 1 - 7);
+  const end = new Date(year, month + 1, 7);
+  try {
+    const data = await apiCall(`/calendar/events?start=${start.toISOString()}&end=${end.toISOString()}`);
+    state.calendarEvents = data;
+  } catch (err) {
+    console.error("Failed to fetch calendar events:", err);
+  }
+}
+
 const stateManager = {
   loadAll: async () => {
     if (!currentToken) return;
     state.loading = true;
     try {
-      const [summary, analytics] = await Promise.all([
+      const [summary, analytics, gcalIntegration] = await Promise.all([
         apiCall("/dashboard/summary").catch(() => null),
         apiCall("/analytics/overview").catch(() => null),
+        apiCall("/integrations/google-calendar").catch(() => null),
         appointmentService.fetch(),
         customerService.fetch(),
         serviceCatalog.fetch(),
@@ -256,6 +278,9 @@ const stateManager = {
       ]);
       if (summary) state.dashboardSummary = summary;
       if (analytics) state.analytics = analytics;
+      if (gcalIntegration) state.googleCalendarIntegration = gcalIntegration;
+
+      await fetchCalendarEvents();
     } catch (err) {
       state.error = err.message;
     } finally {
@@ -538,15 +563,348 @@ function appointmentTable() {
   </div>`;
 }
 
+function googleCalendarSimulatorModal() {
+  if (!state.gcalSimulatorOpen) return "";
+  return `<div class="modal-backdrop open" role="dialog" aria-modal="true" style="z-index:9999;">
+    <form class="modal-panel auth-form" id="gcal-simulator-form-el">
+      <div class="page-head compact">
+        <div class="page-copy">
+          <p class="eyebrow">Google Calendar Simulator</p>
+          <h2>Simulate External Event</h2>
+        </div>
+        <button class="btn" type="button" id="close-gcal-simulator-btn">Close</button>
+      </div>
+      <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem; line-height:1.4;">
+        Add a busy event directly to the Google Calendar mock database. This event will show on your dashboard in orange/green and automatically block availability in the receptionist's scheduling checks.
+      </p>
+      <label>Event Name / Summary
+        <input class="input" id="sim-event-summary" placeholder="e.g. Lunch break or Dental clinic session" required>
+      </label>
+      <label>Description (optional)
+        <input class="input" id="sim-event-desc" placeholder="e.g. Out of office">
+      </label>
+      <label>Start Date & Time
+        <input class="input" id="sim-event-start" type="datetime-local" value="${new Date().toISOString().slice(0, 16)}" required>
+      </label>
+      <label>End Date & Time
+        <input class="input" id="sim-event-end" type="datetime-local" value="${new Date(Date.now() + 3600000).toISOString().slice(0, 16)}" required>
+      </label>
+      <div class="form-error" id="sim-event-error" hidden></div>
+      <button class="btn primary" type="submit">Create Simulated Event</button>
+    </form>
+  </div>`;
+}
+
 function calendarPage() {
-  const days = Array.from({ length: 35 }, (_, index) => index + 1);
-  const appointmentsByDay = appointmentService.listToday().reduce((acc, appointment) => {
-    const day = Number(appointment.date.split(" ").pop());
-    if (day) (acc[day] ||= []).push(appointment);
-    return acc;
-  }, {});
-  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">August 2026</p><h1>Calendar</h1><p>Month view with assistant-driven confirmations and appointment context.</p></div><div class="tabs">${["Day", "Week", "Month"].map((tab, index) => `<button class="tab ${index === 2 ? "active" : ""}">${tab}</button>`).join("")}</div></div>
-  <div class="calendar">${days.map((day) => `<div class="day"><strong>${day}</strong>${(appointmentsByDay[day] || []).map((appointment) => `<div class="appt-chip">${appointment.time} ${escapeHtml(appointment.customer)}</div>`).join("")}</div>`).join("")}</div>`);
+  const view = state.calendarView;
+  const activeDate = state.calendarDate;
+  
+  let headerText = "";
+  if (view === "month") {
+    headerText = activeDate.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  } else if (view === "week") {
+    const startOfWeek = new Date(activeDate);
+    startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(endOfWeek.getDate() + 6);
+    headerText = `${startOfWeek.toLocaleDateString("en-US", { month: "short", day: "numeric" })} – ${endOfWeek.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`;
+  } else {
+    headerText = activeDate.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+  }
+
+  const filteredEvents = state.calendarEvents.filter(evt => {
+    if (state.calendarFilterStaff && evt.appointment && evt.appointment.staffId !== state.calendarFilterStaff) return false;
+    if (state.calendarFilterService && evt.appointment && evt.appointment.serviceId !== state.calendarFilterService) return false;
+    if (state.calendarFilterSource === "LOCAL" && evt.source !== "LOCAL") return false;
+    if (state.calendarFilterSource === "GOOGLE" && evt.source !== "GOOGLE") return false;
+    return true;
+  });
+
+  const year = activeDate.getFullYear();
+  const month = activeDate.getMonth();
+  const firstDayIndex = new Date(year, month, 1).getDay();
+  const totalDays = new Date(year, month + 1, 0).getDate();
+  const prevTotalDays = new Date(year, month, 0).getDate();
+
+  const cells = [];
+  for (let i = firstDayIndex - 1; i >= 0; i--) {
+    cells.push({
+      dayNum: prevTotalDays - i,
+      isCurrentMonth: false,
+      date: new Date(year, month - 1, prevTotalDays - i),
+    });
+  }
+  for (let i = 1; i <= totalDays; i++) {
+    cells.push({
+      dayNum: i,
+      isCurrentMonth: true,
+      date: new Date(year, month, i),
+    });
+  }
+  const remaining = cells.length % 7;
+  if (remaining > 0) {
+    const nextDays = 7 - remaining;
+    for (let i = 1; i <= nextDays; i++) {
+      cells.push({
+        dayNum: i,
+        isCurrentMonth: false,
+        date: new Date(year, month + 1, i),
+      });
+    }
+  }
+  while (cells.length < 35) {
+    const lastCell = cells[cells.length - 1];
+    const nextDate = new Date(lastCell.date);
+    nextDate.setDate(nextDate.getDate() + 1);
+    cells.push({
+      dayNum: nextDate.getDate(),
+      isCurrentMonth: false,
+      date: nextDate,
+    });
+  }
+
+  const startOfWeek = new Date(activeDate);
+  startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
+  const weekDays = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(startOfWeek);
+    d.setDate(d.getDate() + i);
+    weekDays.push(d);
+  }
+
+  let calendarGridHtml = "";
+  
+  if (view === "month") {
+    const headers = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    calendarGridHtml = `
+      <div class="calendar-month-wrap">
+        <div class="cal-month-headers">
+          ${headers.map(h => `<div class="cal-month-header">${h}</div>`).join("")}
+        </div>
+        <div class="cal-month-grid">
+          ${cells.map(cell => {
+            const cellDateStr = cell.date.toDateString();
+            const isToday = cellDateStr === new Date().toDateString();
+            
+            const cellEvents = filteredEvents.filter(evt => {
+              const start = new Date(evt.startTime);
+              const end = new Date(evt.endTime);
+              const cellStart = new Date(cell.date);
+              cellStart.setHours(0,0,0,0);
+              const cellEnd = new Date(cell.date);
+              cellEnd.setHours(23,59,59,999);
+              return start < cellEnd && end > cellStart;
+            });
+
+            return `
+              <div class="cal-month-day ${cell.isCurrentMonth ? "" : "offset-month"} ${isToday ? "today-cell" : ""}" data-date="${cell.date.toISOString()}">
+                <div class="day-number-label">
+                  <span class="day-badge-num">${cell.dayNum}</span>
+                  ${isToday ? `<span class="today-marker-dot"></span>` : ""}
+                </div>
+                <div class="day-events-container">
+                  ${cellEvents.map(evt => {
+                    const isGoogle = evt.source === "GOOGLE";
+                    return `
+                      <button class="cal-event-chip ${isGoogle ? "gcal-event" : "local-event"} ${badgeClass(evt.status || "")}" data-open-appt="${evt.id}" title="${escapeHtml(evt.title)}">
+                        <span class="event-time-prefix">${new Date(evt.startTime).toLocaleTimeString([], {hour: 'numeric', minute:'2-digit'})}</span>
+                        <span class="event-title-text">${escapeHtml(evt.title)}</span>
+                      </button>
+                    `;
+                  }).join("")}
+                </div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      </div>
+    `;
+  } else if (view === "week") {
+    const hourRows = Array.from({ length: 11 }, (_, i) => i + 8);
+    
+    calendarGridHtml = `
+      <div class="calendar-week-wrap">
+        <div class="cal-week-headers-row">
+          <div class="time-column-header"></div>
+          ${weekDays.map(d => {
+            const isToday = d.toDateString() === new Date().toDateString();
+            return `
+              <div class="week-column-header ${isToday ? "today-header" : ""}">
+                <div class="week-day-name">${d.toLocaleDateString("en-US", { weekday: "short" })}</div>
+                <div class="week-day-num">${d.getDate()}</div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+        
+        <div class="cal-week-grid-body">
+          <div class="time-labels-col">
+            ${hourRows.map(h => `<div class="time-label-row"><span>${h > 12 ? h - 12 : h} ${h >= 12 ? "PM" : "AM"}</span></div>`).join("")}
+          </div>
+          
+          <div class="week-days-cols-container">
+            ${weekDays.map(d => {
+              const dayStart = new Date(d);
+              dayStart.setHours(0,0,0,0);
+              const dayEnd = new Date(d);
+              dayEnd.setHours(23,59,59,999);
+              
+              const dayEvents = filteredEvents.filter(evt => {
+                const start = new Date(evt.startTime);
+                const end = new Date(evt.endTime);
+                return start < dayEnd && end > dayStart;
+              });
+
+              return `
+                <div class="week-day-col" data-date="${d.toISOString()}">
+                  ${hourRows.map(h => {
+                    const clickDate = new Date(d);
+                    clickDate.setHours(h, 0, 0, 0);
+                    return `<div class="hour-grid-cell" data-action="quick-book-slot" data-slot="${clickDate.toISOString()}" title="Click to quick book slot at ${h > 12 ? h - 12 : h}:00 ${h >= 12 ? "PM" : "AM"}"></div>`;
+                  }).join("")}
+                  
+                  ${dayEvents.map(evt => {
+                    const isGoogle = evt.source === "GOOGLE";
+                    const start = new Date(evt.startTime);
+                    const end = new Date(evt.endTime);
+                    
+                    const startHour = start.getHours() + start.getMinutes() / 60;
+                    const endHour = end.getHours() + end.getMinutes() / 60;
+                    
+                    const clampedStart = Math.max(8, Math.min(18, startHour));
+                    const clampedEnd = Math.max(8, Math.min(18, endHour));
+                    
+                    const top = (clampedStart - 8) * 50;
+                    const height = Math.max(24, (clampedEnd - clampedStart) * 50);
+                    
+                    return `
+                      <div class="cal-event-card ${isGoogle ? "gcal-card" : "local-card"} ${badgeClass(evt.status || "")}" 
+                           style="top:${top}px; height:${height}px;" 
+                           data-open-appt="${evt.id}">
+                        <div class="card-time">${start.toLocaleTimeString([], {hour: 'numeric', minute:'2-digit'})} - ${end.toLocaleTimeString([], {hour: 'numeric', minute:'2-digit'})}</div>
+                        <div class="card-title">${escapeHtml(evt.title)}</div>
+                        ${evt.description ? `<div class="card-desc">${escapeHtml(evt.description)}</div>` : ""}
+                      </div>
+                    `;
+                  }).join("")}
+                </div>
+              `;
+            }).join("")}
+          </div>
+        </div>
+      </div>
+    `;
+  } else {
+    const hourRows = Array.from({ length: 11 }, (_, i) => i + 8);
+    const d = activeDate;
+    const dayStart = new Date(d);
+    dayStart.setHours(0,0,0,0);
+    const dayEnd = new Date(d);
+    dayEnd.setHours(23,59,59,999);
+    
+    const dayEvents = filteredEvents.filter(evt => {
+      const start = new Date(evt.startTime);
+      const end = new Date(evt.endTime);
+      return start < dayEnd && end > dayStart;
+    });
+
+    calendarGridHtml = `
+      <div class="calendar-day-wrap">
+        <div class="cal-week-grid-body">
+          <div class="time-labels-col">
+            ${hourRows.map(h => `<div class="time-label-row"><span>${h > 12 ? h - 12 : h} ${h >= 12 ? "PM" : "AM"}</span></div>`).join("")}
+          </div>
+          
+          <div class="week-days-cols-container" style="grid-template-columns: 1fr;">
+            <div class="week-day-col single-day-col" data-date="${d.toISOString()}">
+              ${hourRows.map(h => {
+                const clickDate = new Date(d);
+                clickDate.setHours(h, 0, 0, 0);
+                return `<div class="hour-grid-cell" data-action="quick-book-slot" data-slot="${clickDate.toISOString()}" title="Click to quick book slot at ${h > 12 ? h - 12 : h}:00 ${h >= 12 ? "PM" : "AM"}"></div>`;
+              }).join("")}
+              
+              ${dayEvents.map(evt => {
+                const isGoogle = evt.source === "GOOGLE";
+                const start = new Date(evt.startTime);
+                const end = new Date(evt.endTime);
+                
+                const startHour = start.getHours() + start.getMinutes() / 60;
+                const endHour = end.getHours() + end.getMinutes() / 60;
+                
+                const clampedStart = Math.max(8, Math.min(18, startHour));
+                const clampedEnd = Math.max(8, Math.min(18, endHour));
+                
+                const top = (clampedStart - 8) * 50;
+                const height = Math.max(24, (clampedEnd - clampedStart) * 50);
+                
+                return `
+                  <div class="cal-event-card ${isGoogle ? "gcal-card" : "local-card"} ${badgeClass(evt.status || "")}" 
+                       style="top:${top}px; height:${height}px;" 
+                       data-open-appt="${evt.id}">
+                    <div class="card-time">${start.toLocaleTimeString([], {hour: 'numeric', minute:'2-digit'})} - ${end.toLocaleTimeString([], {hour: 'numeric', minute:'2-digit'})}</div>
+                    <div class="card-title">${escapeHtml(evt.title)}</div>
+                    ${evt.description ? `<div class="card-desc">${escapeHtml(evt.description)}</div>` : ""}
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  const staffList = staffDirectory.list();
+  const serviceList = serviceCatalog.list();
+
+  return shell(`
+    <div class="page-head calendar-page-head">
+      <div class="page-copy">
+        <p class="eyebrow" id="calendar-view-subtitle">Live Real-Time Appointments</p>
+        <div style="display:flex; align-items:center; gap:1.5rem; flex-wrap:wrap;">
+          <h1 id="calendar-header-title" style="margin:0;">${headerText}</h1>
+          <div class="clock-widget" id="realtime-clock">EST Time</div>
+        </div>
+      </div>
+      
+      <div class="actions calendar-view-actions">
+        <div class="btn-group">
+          <button class="btn secondary ${view === "day" ? "active" : ""}" id="view-day-btn">Day</button>
+          <button class="btn secondary ${view === "week" ? "active" : ""}" id="view-week-btn">Week</button>
+          <button class="btn secondary ${view === "month" ? "active" : ""}" id="view-month-btn">Month</button>
+        </div>
+        <button class="btn info" id="open-gcal-simulator-btn">⚙️ Google Calendar Simulator</button>
+        
+      </div>
+    </div>
+
+    <div class="cal-toolbar">
+      <div class="cal-nav-controls">
+        <button class="btn secondary compact" id="cal-prev-btn">&larr; Previous</button>
+        <button class="btn secondary compact" id="cal-today-btn">Today</button>
+        <button class="btn secondary compact" id="cal-next-btn">Next &rarr;</button>
+      </div>
+      
+      <div class="cal-filter-controls">
+        <select class="select compact" id="cal-filter-staff" aria-label="Filter by Staff">
+          <option value="">All Staff</option>
+          ${staffList.map(s => `<option value="${s.id}" ${state.calendarFilterStaff === s.id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}
+        </select>
+        <select class="select compact" id="cal-filter-service" aria-label="Filter by Service">
+          <option value="">All Services</option>
+          ${serviceList.map(s => `<option value="${s.id}" ${state.calendarFilterService === s.id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}
+        </select>
+        <select class="select compact" id="cal-filter-source" aria-label="Filter by Source">
+          <option value="" ${state.calendarFilterSource === "" ? "selected" : ""}>All Sources</option>
+          <option value="LOCAL" ${state.calendarFilterSource === "LOCAL" ? "selected" : ""}>Walter Appointments</option>
+          <option value="GOOGLE" ${state.calendarFilterSource === "GOOGLE" ? "selected" : ""}>Google Calendar Events</option>
+        </select>
+      </div>
+    </div>
+
+    ${calendarGridHtml}
+    ${googleCalendarSimulatorModal()}
+  `);
 }
 
 function conversationList(items = conversationService.list()) {
@@ -679,14 +1037,65 @@ function assistantPage() {
 }
 
 function integrationsPage() {
-  const integrations = [
-    ["Calendar", "Sync staff availability and push confirmed appointments.", "Not Connected"],
-    ["Phone", `Route inbound calls through ${assistantName}.`, "Not Connected"],
-    ["Messaging", "Unify WhatsApp and email conversations.", "Not Connected"],
-    ["Payments", "Attach deposits and invoices to booked services.", "Planned"],
-  ];
-  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Connected Channels</p><h1>Integrations</h1><p>Connect the systems that feed appointment requests into the same backend workflow.</p></div><button class="btn primary" data-action="save">Connect App</button></div>
-  <div class="grid four-col">${integrations.map(([name, detail, status]) => `<article class="card integration-card"><h3>${name}</h3><p>${detail}</p><span class="badge">${status}</span></article>`).join("")}</div>`);
+  const gcal = state.googleCalendarIntegration || { enabled: false, config: {} };
+  return shell(`<div class="page-head"><div class="page-copy"><p class="eyebrow">Connected Channels</p><h1>Integrations</h1><p>Connect Google Calendar and other channels to unify your appointment workflows.</p></div></div>
+  <div class="grid two-col">
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Google Calendar Integration</h2>
+          <p class="meta">Synchronize staff busy times and appointments automatically.</p>
+        </div>
+        <span class="badge ${gcal.enabled ? 'success' : 'warning'}">${gcal.enabled ? 'Enabled' : 'Disabled'}</span>
+      </div>
+      <form class="auth-form" id="google-calendar-config-form" style="margin-top:1.5rem;">
+        <label class="row" style="display:flex; align-items:center; gap:0.5rem; margin-bottom:1rem; cursor:pointer;">
+          <input type="checkbox" id="gcal-enabled" ${gcal.enabled ? 'checked' : ''} style="width:auto; margin:0;">
+          <span><strong>Enable Google Calendar Sync</strong></span>
+        </label>
+        <label>Google Calendar ID
+          <input class="input" id="gcal-calendar-id" value="${escapeHtml(gcal.config?.googleCalendarId || '')}" placeholder="e.g. primary or standard Gmail email" required>
+          <span class="helper">Enter your primary Gmail email address, or the specific Google Calendar ID.</span>
+        </label>
+        <label>Google Service Account Email
+          <input class="input" id="gcal-client-email" value="${escapeHtml(gcal.config?.googleServiceAccountEmail || '')}" placeholder="e.g. walter-ai@receptionist.iam.gserviceaccount.com">
+          <span class="helper">Or leave blank to use the shared system Service Account.</span>
+        </label>
+        <label>Service Account Private Key (JSON / PEM format)
+          <textarea class="input textarea" id="gcal-private-key" placeholder="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----" style="height:120px; font-family:monospace; font-size:0.8rem;">${escapeHtml(gcal.config?.googlePrivateKey || '')}</textarea>
+          <span class="helper">If using the shared Service Account, share your Google Calendar with <code>walter-ai@walter-ai-receptionist.iam.gserviceaccount.com</code> and leave these fields blank!</span>
+        </label>
+        <div style="display:flex; gap:1rem; margin-top:1.5rem;">
+          <button class="btn primary" type="submit">Save Settings</button>
+          <button class="btn secondary" type="button" id="gcal-manual-sync-btn">🔄 Sync Now</button>
+        </div>
+      </form>
+    </section>
+    
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Setup Instructions</h2>
+          <p class="meta">How to link your Google Calendar for free (Link-Free OAuth)</p>
+        </div>
+      </div>
+      <div style="margin-top:1.5rem; display:flex; flex-direction:column; gap:1rem; font-size:0.9rem;">
+        <div style="padding:1rem; background:rgba(0,0,0,0.03); border-radius:var(--radius); line-height:1.4;">
+          <strong>Method 1: Zero-Config Shared Account (easiest & recommended)</strong>
+          <ol style="margin-top:0.5rem; padding-left:1.25rem; display:flex; flex-direction:column; gap:0.25rem;">
+            <li>Go to your <a href="https://calendar.google.com" target="_blank" style="text-decoration:underline;">Google Calendar</a>.</li>
+            <li>In settings under "Settings for my calendars", click your calendar and choose "Share with specific people or groups".</li>
+            <li>Add our system service email: <code>walter-ai@walter-ai-receptionist.iam.gserviceaccount.com</code> (give it Permission: "Make changes to events").</li>
+            <li>Paste your main Gmail email address in the "Google Calendar ID" box on the left, check "Enable", and click Save.</li>
+          </ol>
+        </div>
+        <div style="padding:1rem; background:rgba(0,0,0,0.03); border-radius:var(--radius); line-height:1.4;">
+          <strong>Method 2: Custom Service Account Key (private isolation)</strong>
+          <p style="margin-top:0.5rem;">If you prefer to run your own credentials, create a service account in Google Cloud Console, download the JSON key file, and copy-paste the client email and private key in the fields on the left.</p>
+        </div>
+      </div>
+    </section>
+  </div>`);
 }
 
 function billingPage() {
@@ -714,21 +1123,42 @@ function analyticsPage() {
 
 function drawer() {
   const appointment = appointmentService.getById(drawerAppointment);
-  return `<div class="drawer ${appointment ? "open" : ""}" role="dialog" aria-modal="true">
-    <aside class="drawer-panel">${appointment ? `<div class="page-head"><div class="page-copy"><p class="eyebrow">Appointment details</p><h2>${appointment.customer}</h2></div><button class="btn" data-action="close">Close</button></div>
+  const googleEvent = state.calendarEvents.find(evt => evt.id === drawerAppointment && evt.source === 'GOOGLE');
+  
+  const isOpen = !!appointment || !!googleEvent;
+  
+  return `<div class="drawer ${isOpen ? "open" : ""}" role="dialog" aria-modal="true">
+    <aside class="drawer-panel">
+      ${appointment ? `<div class="page-head"><div class="page-copy"><p class="eyebrow">Appointment details</p><h2>${appointment.customer}</h2></div><button class="btn" data-action="close">Close</button></div>
       <div class="detail-stack">
         <p><strong>Service:</strong> ${appointment.service}</p>
         <p><strong>Time:</strong> ${appointment.date}, ${appointment.time}, ${appointment.duration}</p>
         <p><strong>Staff:</strong> ${appointment.staff}</p>
         <p><strong>Booked through:</strong> ${appointment.channel}</p>
         <p><strong>Status:</strong> <span class="badge ${badgeClass(appointment.status)}">${appointment.status}</span></p>
+        ${appointment.appointment?.googleCalendarEventId ? `<p><strong>Google Calendar Sync:</strong> <span class="badge success">SYNCHRONIZED</span> (ID: <code>${appointment.appointment.googleCalendarEventId}</code>)</p>` : ''}
         <div class="actions">
           <button class="btn primary" data-action="confirm-appt" data-id="${appointment.id}">Confirm</button>
           <button class="btn" data-action="reschedule-appt" data-id="${appointment.id}">Reschedule</button>
           <button class="btn danger" data-action="cancel-appt" data-id="${appointment.id}">Cancel</button>
           <button class="btn" data-action="close">Close</button>
         </div>
-      </div>` : ""}</aside>
+      </div>` : ''}
+      
+      ${googleEvent ? `<div class="page-head"><div class="page-copy"><p class="eyebrow">Google Calendar Event</p><h2>${escapeHtml(googleEvent.title)}</h2></div><button class="btn" data-action="close">Close</button></div>
+      <div class="detail-stack">
+        <p><strong>Description:</strong> ${escapeHtml(googleEvent.description || 'No description provided')}</p>
+        <p><strong>Start:</strong> ${new Date(googleEvent.startTime).toLocaleString("en-US")}</p>
+        <p><strong>End:</strong> ${new Date(googleEvent.endTime).toLocaleString("en-US")}</p>
+        <p><strong>Source:</strong> <span class="badge success">Google Calendar (External)</span></p>
+        <div class="alert-info" style="margin-top: 1rem; padding: 0.75rem; border-radius: var(--radius); background: rgba(0,128,0,0.1); color: green; font-size: 0.85rem;">
+          This event is synchronized from your real Google Calendar and blocks booking slots in Walter.
+        </div>
+        <div class="actions" style="margin-top: 1.5rem;">
+          <button class="btn" data-action="close">Close</button>
+        </div>
+      </div>` : ''}
+    </aside>
   </div>`;
 }
 
@@ -827,6 +1257,68 @@ function attachFormListeners() {
       } catch (err) {
         errorDiv.hidden = false;
         errorDiv.textContent = err.message || "Customer could not be saved.";
+      }
+    });
+  }
+
+  const gcalConfigForm = document.getElementById("google-calendar-config-form");
+  if (gcalConfigForm) {
+    gcalConfigForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const enabled = document.getElementById("gcal-enabled").checked;
+      const googleCalendarId = document.getElementById("gcal-calendar-id").value.trim();
+      const googleServiceAccountEmail = document.getElementById("gcal-client-email").value.trim();
+      const googlePrivateKey = document.getElementById("gcal-private-key").value.trim();
+
+      try {
+        await apiCall("/integrations/google-calendar", "POST", {
+          enabled,
+          googleCalendarId,
+          googleServiceAccountEmail,
+          googlePrivateKey,
+        });
+        showToast("Google Calendar integration saved!");
+        await stateManager.loadAll();
+      } catch (err) {
+        showToast(err.message || "Failed to save Google Calendar config.");
+      }
+    });
+  }
+
+  const manualSyncBtn = document.getElementById("gcal-manual-sync-btn");
+  if (manualSyncBtn) {
+    manualSyncBtn.addEventListener("click", async () => {
+      showToast("Syncing Google Calendar...");
+      try {
+        const res = await apiCall("/integrations/google-calendar/sync", "POST");
+        showToast(res.message || "Google Calendar sync complete!");
+        await stateManager.loadAll();
+      } catch (err) {
+        showToast("Sync failed: " + err.message);
+      }
+    });
+  }
+
+  const gcalSimForm = document.getElementById("gcal-simulator-form-el");
+  if (gcalSimForm) {
+    gcalSimForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errorDiv = document.getElementById("sim-event-error");
+      const payload = {
+        summary: document.getElementById("sim-event-summary").value.trim(),
+        description: document.getElementById("sim-event-desc").value.trim(),
+        startTime: document.getElementById("sim-event-start").value,
+        endTime: document.getElementById("sim-event-end").value,
+      };
+
+      try {
+        await apiCall("/integrations/google-calendar/simulator-event", "POST", payload);
+        showToast("Simulated Google event created!");
+        state.gcalSimulatorOpen = false;
+        await stateManager.loadAll();
+      } catch (err) {
+        errorDiv.hidden = false;
+        errorDiv.textContent = err.message || "Failed to create simulated event.";
       }
     });
   }
@@ -939,6 +1431,130 @@ async function render() {
 
     showToast(notificationService.messageFor(action));
   }));
+
+  // Calendar View Toggles
+  const viewDayBtn = document.getElementById("view-day-btn");
+  if (viewDayBtn) viewDayBtn.addEventListener("click", () => { state.calendarView = "day"; render(); });
+  const viewWeekBtn = document.getElementById("view-week-btn");
+  if (viewWeekBtn) viewWeekBtn.addEventListener("click", () => { state.calendarView = "week"; render(); });
+  const viewMonthBtn = document.getElementById("view-month-btn");
+  if (viewMonthBtn) viewMonthBtn.addEventListener("click", () => { state.calendarView = "month"; render(); });
+
+  // Calendar Simulator toggle
+  const openGcalSimBtn = document.getElementById("open-gcal-simulator-btn");
+  if (openGcalSimBtn) openGcalSimBtn.addEventListener("click", () => { state.gcalSimulatorOpen = true; render(); });
+  const closeGcalSimBtn = document.getElementById("close-gcal-simulator-btn");
+  if (closeGcalSimBtn) closeGcalSimBtn.addEventListener("click", () => { state.gcalSimulatorOpen = false; render(); });
+
+  // Calendar Sync
+  const calSyncGcalBtn = document.getElementById("cal-sync-gcal-btn");
+  if (calSyncGcalBtn) calSyncGcalBtn.addEventListener("click", async () => {
+    showToast("Syncing Google Calendar...");
+    try {
+      const res = await apiCall("/integrations/google-calendar/sync", "POST");
+      showToast(res.message || "Synced successfully!");
+      await stateManager.loadAll();
+    } catch (e) {
+      showToast(e.message || "Sync failed");
+    }
+  });
+
+  // Calendar Nav controls
+  const calPrevBtn = document.getElementById("cal-prev-btn");
+  if (calPrevBtn) calPrevBtn.addEventListener("click", async () => {
+    const d = state.calendarDate;
+    if (state.calendarView === "month") d.setMonth(d.getMonth() - 1);
+    else if (state.calendarView === "week") d.setDate(d.getDate() - 7);
+    else d.setDate(d.getDate() - 1);
+    await fetchCalendarEvents();
+    render();
+  });
+  const calTodayBtn = document.getElementById("cal-today-btn");
+  if (calTodayBtn) calTodayBtn.addEventListener("click", async () => {
+    state.calendarDate = new Date("2026-08-23T12:00:00");
+    await fetchCalendarEvents();
+    render();
+  });
+  const calNextBtn = document.getElementById("cal-next-btn");
+  if (calNextBtn) calNextBtn.addEventListener("click", async () => {
+    const d = state.calendarDate;
+    if (state.calendarView === "month") d.setMonth(d.getMonth() + 1);
+    else if (state.calendarView === "week") d.setDate(d.getDate() + 7);
+    else d.setDate(d.getDate() + 1);
+    await fetchCalendarEvents();
+    render();
+  });
+
+  // Calendar filters
+  const calFilterStaff = document.getElementById("cal-filter-staff");
+  if (calFilterStaff) calFilterStaff.addEventListener("change", (e) => { state.calendarFilterStaff = e.target.value; render(); });
+  const calFilterService = document.getElementById("cal-filter-service");
+  if (calFilterService) calFilterService.addEventListener("change", (e) => { state.calendarFilterService = e.target.value; render(); });
+  const calFilterSource = document.getElementById("cal-filter-source");
+  if (calFilterSource) calFilterSource.addEventListener("change", (e) => { state.calendarFilterSource = e.target.value; render(); });
+
+  // Quick book slots in Day/Week
+  document.querySelectorAll("[data-action='quick-book-slot']").forEach(el => {
+    el.addEventListener("click", async () => {
+      const slotTime = el.dataset.slot;
+      const srvs = await apiCall("/services");
+      const stff = await apiCall("/staff");
+      const custs = await apiCall("/customers");
+
+      if (srvs.length === 0) {
+        showToast("Create a service first before booking.");
+        return;
+      }
+
+      const custName = prompt("Enter customer name to book at this slot:");
+      if (!custName) return;
+
+      try {
+        const normalizedName = custName.trim();
+        const targetCust = custs.find(c => c.name.toLowerCase() === normalizedName.toLowerCase()) ||
+          await apiCall("/customers", "POST", { name: normalizedName, segment: "New lead" });
+        
+        await appointmentService.book({
+          customerId: targetCust.id,
+          serviceId: srvs[0].id,
+          staffId: stff[0]?.id,
+          startTime: slotTime,
+          channel: "web",
+          notes: "Quick booked from calendar cell",
+        });
+
+        showToast("Appointment booked!");
+        await stateManager.loadAll();
+      } catch (err) {
+        showToast(err.message || "Booking failed");
+      }
+    });
+  });
+
+  // Time ticking clock widget
+  if (currentRoute === "calendar") {
+    startClock();
+  }
+}
+
+let clockInterval = null;
+function startClock() {
+  const update = () => {
+    const el = document.getElementById("realtime-clock");
+    if (el) {
+      const now = new Date();
+      el.textContent = now.toLocaleTimeString("en-US", {
+        timeZone: "America/New_York",
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: true,
+      }) + " EST";
+    }
+  };
+  update();
+  if (clockInterval) clearInterval(clockInterval);
+  clockInterval = setInterval(update, 1000);
 }
 
 // Boot sequence: check session & load state

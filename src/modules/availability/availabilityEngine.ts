@@ -1,5 +1,6 @@
 import { prisma } from '../../db/prisma.js';
 import { AppError } from '../../middleware/errorHandler.js';
+import { CalendarSyncEngine } from '../calendar/calendarAdapter.js';
 
 export interface GetAvailabilityQuery {
   businessId: string;
@@ -87,6 +88,16 @@ export class AvailabilityEngine {
       },
     });
 
+    // 2.5. Fetch Google Calendar events for the day
+    let googleEvents: any[] = [];
+    try {
+      googleEvents = await CalendarSyncEngine.listGoogleCalendarEvents(businessId, dayStartISO, dayEndISO);
+    } catch (err) {
+      console.error('Failed to fetch google calendar events in availability engine', err);
+    }
+
+    const now = new Date();
+
     // 3. Generate candidate time slots spaced by 30 minutes
     const slots: TimeSlot[] = [];
     const durationMs = service.durationMinutes * 60 * 1000;
@@ -102,11 +113,25 @@ export class AvailabilityEngine {
       const effectiveStart = new Date(currentSlotStart.getTime() - bufferMs);
       const effectiveEnd = new Date(currentSlotEnd.getTime() + bufferMs);
 
-      const hasConflict = existingAppointments.some((appt) => {
+      const isPast = currentSlotStart.getTime() < now.getTime();
+
+      const hasLocalConflict = existingAppointments.some((appt) => {
         const apptStart = new Date(appt.startTime);
         const apptEnd = new Date(appt.endTime);
         return apptStart < effectiveEnd && apptEnd > effectiveStart;
       });
+
+      const hasGoogleConflict = googleEvents.some((gEvent) => {
+        const gStart = new Date(gEvent.startTime);
+        const gEnd = new Date(gEvent.endTime);
+        return gStart < currentSlotEnd && gEnd > currentSlotStart;
+      });
+
+      const hasConflict = isPast || hasLocalConflict || hasGoogleConflict;
+      let reason: string | undefined = undefined;
+      if (isPast) reason = 'Past slot';
+      else if (hasLocalConflict) reason = 'Booked';
+      else if (hasGoogleConflict) reason = 'Google Event';
 
       const formattedTime = currentSlotStart.toLocaleTimeString('en-US', {
         hour: 'numeric',
@@ -120,7 +145,7 @@ export class AvailabilityEngine {
         formattedTime,
         available: !hasConflict,
         staffId: staffId || undefined,
-        reason: hasConflict ? 'Booked' : undefined,
+        reason,
       });
 
       currentSlotStart = new Date(currentSlotStart.getTime() + intervalMs);

@@ -7,6 +7,7 @@ import { AvailabilityEngine } from '../modules/availability/availabilityEngine.j
 import { AIToolLayer } from '../modules/ai/aiToolLayer.js';
 import { ConversationService } from '../modules/conversations/conversationService.js';
 import { AppError } from '../middleware/errorHandler.js';
+import { CalendarSyncEngine } from '../modules/calendar/calendarAdapter.js';
 
 export const apiRouter = Router();
 
@@ -628,6 +629,193 @@ apiRouter.patch('/business/settings', async (req: AuthenticatedRequest, res, nex
     });
 
     return res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// -------------------------------------------------------------
+// 7.5. GOOGLE CALENDAR SYNC & INTEGRATION
+// -------------------------------------------------------------
+
+apiRouter.get('/integrations/google-calendar', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const integration = await prisma.integration.findFirst({
+      where: { businessId: tenantId, provider: 'GOOGLE_CALENDAR' },
+    });
+
+    if (!integration) {
+      return res.json({
+        enabled: false,
+        config: {
+          googleCalendarId: '',
+          googleServiceAccountEmail: '',
+          googlePrivateKey: '',
+        },
+      });
+    }
+
+    const config = integration.config ? JSON.parse(integration.config) : {};
+    const censoredConfig = {
+      ...config,
+      googlePrivateKey: config.googlePrivateKey ? '********' : '',
+    };
+
+    return res.json({
+      enabled: integration.enabled,
+      config: censoredConfig,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.post('/integrations/google-calendar', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const { enabled, googleCalendarId, googleServiceAccountEmail, googlePrivateKey } = req.body;
+
+    const existing = await prisma.integration.findFirst({
+      where: { businessId: tenantId, provider: 'GOOGLE_CALENDAR' },
+    });
+
+    let privateKeyToSave = googlePrivateKey;
+    if (existing && existing.config && googlePrivateKey === '********') {
+      const prevConfig = JSON.parse(existing.config);
+      privateKeyToSave = prevConfig.googlePrivateKey;
+    }
+
+    const newConfig = {
+      googleCalendarId: googleCalendarId || '',
+      googleServiceAccountEmail: googleServiceAccountEmail || '',
+      googlePrivateKey: privateKeyToSave || '',
+    };
+
+    let result;
+    if (existing) {
+      result = await prisma.integration.update({
+        where: { id: existing.id },
+        data: {
+          enabled: !!enabled,
+          config: JSON.stringify(newConfig),
+        },
+      });
+    } else {
+      result = await prisma.integration.create({
+        data: {
+          businessId: tenantId,
+          provider: 'GOOGLE_CALENDAR',
+          enabled: !!enabled,
+          config: JSON.stringify(newConfig),
+        },
+      });
+    }
+
+    return res.json({
+      success: true,
+      enabled: result.enabled,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.post('/integrations/google-calendar/sync', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const unsynced = await prisma.appointment.findMany({
+      where: {
+        businessId: tenantId,
+        status: { notIn: ['cancelled'] },
+        googleCalendarEventId: null,
+      },
+      include: { customer: true, service: true, staff: true },
+    });
+
+    let syncCount = 0;
+    for (const appt of unsynced) {
+      const extId = await CalendarSyncEngine.syncAppointmentToCalendar(tenantId, appt);
+      if (extId) syncCount++;
+    }
+
+    return res.json({ success: true, message: `Synced ${syncCount} appointments.`, syncCount });
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.post('/integrations/google-calendar/simulator-event', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const { summary, description, startTime, endTime } = req.body;
+    if (!summary || !startTime || !endTime) {
+      throw new AppError('summary, startTime, and endTime are required', 400);
+    }
+    const id = await CalendarSyncEngine.addSimulatorEvent({
+      summary,
+      description: description || '',
+      startTime,
+      endTime,
+    });
+    return res.json({ success: true, eventId: id });
+  } catch (err) {
+    next(err);
+  }
+});
+
+apiRouter.get('/calendar/events', async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const tenantId = getTenantId(req);
+    const { start, end } = req.query;
+
+    if (!start || !end) {
+      throw new AppError('start and end ISO date query parameters are required', 400);
+    }
+
+    const startDate = new Date(String(start));
+    const endDate = new Date(String(end));
+
+    const localAppointments = await prisma.appointment.findMany({
+      where: {
+        businessId: tenantId,
+        status: { notIn: ['cancelled'] },
+        startTime: { gte: startDate },
+        endTime: { lte: endDate },
+      },
+      include: { customer: true, service: true, staff: true },
+    });
+
+    let googleEvents: any[] = [];
+    try {
+      googleEvents = await CalendarSyncEngine.listGoogleCalendarEvents(tenantId, startDate, endDate);
+    } catch (err) {
+      console.error('Failed to fetch google calendar events in route', err);
+    }
+
+    const mappedLocal = localAppointments.map(appt => ({
+      id: appt.id,
+      title: `${appt.customer?.name || 'Customer'} - ${appt.service?.name || 'Service'}`,
+      description: `Staff: ${appt.staff?.name || 'Unassigned'}. Status: ${appt.status}. Notes: ${appt.notes || ''}`,
+      startTime: appt.startTime,
+      endTime: appt.endTime,
+      source: 'LOCAL',
+      status: appt.status,
+      customerName: appt.customer?.name || 'Customer',
+      serviceName: appt.service?.name || 'Service',
+      staffName: appt.staff?.name || 'Staff',
+      appointment: appt,
+    }));
+
+    const mappedGcal = googleEvents.map(evt => ({
+      id: evt.id,
+      title: evt.title,
+      description: evt.description || 'Google Calendar Event',
+      startTime: evt.startTime,
+      endTime: evt.endTime,
+      source: 'GOOGLE',
+    }));
+
+    return res.json([...mappedLocal, ...mappedGcal]);
   } catch (err) {
     next(err);
   }
