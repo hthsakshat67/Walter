@@ -18,7 +18,13 @@ async function apiCall(endpoint, method = "GET", body = null) {
 
   try {
     const res = await fetch(`${API_BASE}${endpoint}`, options);
-    const data = await res.json();
+    const text = await res.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(res.ok ? "Invalid server response" : `Server error (${res.status})`);
+    }
     if (!res.ok) {
       throw new Error(data.error || data.message || "API request failed");
     }
@@ -398,9 +404,34 @@ function productDemo() {
         ${metric(summary.noShowRisk, "At risk")}
       </div>
       <div class="demo-grid">
-        ${compactPreviewRows()}
+        ${currentToken ? compactPreviewRows() : featureHighlights()}
         ${phoneDemo()}
       </div>
+    </div>
+  </div>`;
+}
+
+function featureHighlights() {
+  return `<div class="feature-highlights">
+    <div class="feature-highlight-card">
+      <span class="feature-icon">📅</span>
+      <strong>Smart Scheduling</strong>
+      <span class="meta">Auto-fill open slots and reduce gaps in your calendar.</span>
+    </div>
+    <div class="feature-highlight-card">
+      <span class="feature-icon">📞</span>
+      <strong>AI Call Handling</strong>
+      <span class="meta">Capture customer intent from every phone call automatically.</span>
+    </div>
+    <div class="feature-highlight-card">
+      <span class="feature-icon">🔔</span>
+      <strong>Instant Notifications</strong>
+      <span class="meta">Get alerts for new bookings, cancellations, and no-shows.</span>
+    </div>
+    <div class="feature-highlight-card">
+      <span class="feature-icon">📊</span>
+      <strong>Live Dashboard</strong>
+      <span class="meta">See your entire day at a glance with real-time metrics.</span>
     </div>
   </div>`;
 }
@@ -1446,18 +1477,6 @@ async function render() {
   const closeGcalSimBtn = document.getElementById("close-gcal-simulator-btn");
   if (closeGcalSimBtn) closeGcalSimBtn.addEventListener("click", () => { state.gcalSimulatorOpen = false; render(); });
 
-  // Calendar Sync
-  const calSyncGcalBtn = document.getElementById("cal-sync-gcal-btn");
-  if (calSyncGcalBtn) calSyncGcalBtn.addEventListener("click", async () => {
-    showToast("Syncing Google Calendar...");
-    try {
-      const res = await apiCall("/integrations/google-calendar/sync", "POST");
-      showToast(res.message || "Synced successfully!");
-      await stateManager.loadAll();
-    } catch (e) {
-      showToast(e.message || "Sync failed");
-    }
-  });
 
   // Calendar Nav controls
   const calPrevBtn = document.getElementById("cal-prev-btn");

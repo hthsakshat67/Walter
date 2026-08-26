@@ -690,18 +690,56 @@ tbody tr:hover { background: var(--surface-secondary); }
 
 /* Modern Calendar styles addition */
 .clock-widget {
-  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-  color: white;
+  background: var(--primary);
+  color: var(--primary-contrast);
   padding: 6px 14px;
   border-radius: 20px;
-  font-family: monospace;
-  font-size: 0.95rem;
-  font-weight: 700;
+  font-family: var(--font);
+  font-size: 0.9rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
   box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06);
-  letter-spacing: 0.05em;
+  letter-spacing: 0.02em;
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.feature-highlights {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+
+.feature-highlight-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.feature-highlight-card:hover {
+  box-shadow: var(--shadow-soft);
+  transform: translateY(-2px);
+}
+
+.feature-icon {
+  font-size: 1.5rem;
+  margin-bottom: var(--space-1);
+}
+
+.feature-highlight-card strong {
+  font-size: 0.95rem;
+  color: var(--text);
+}
+
+.feature-highlight-card .meta {
+  font-size: 0.82rem;
+  line-height: 1.4;
 }
 
 .cal-toolbar {
